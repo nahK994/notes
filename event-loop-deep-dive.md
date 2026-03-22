@@ -1,4 +1,4 @@
-# 📦 Part 1: Event Loop & Asyncio Deep Dive
+# 📦 Event Loop & Asyncio Deep Dive
 
 ---
 
