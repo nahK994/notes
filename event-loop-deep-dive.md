@@ -1,7 +1,5 @@
 # 🔒 Part 1:  📦 Event Loop & Asyncio Deep Dive
 
----
-
 ## 🧠 1. Event Loop — ২ লাইনের সত্য
 
 > **Event loop হলো একটা infinite loop, যেটা ready থাকা task execute করে, আর বাকিগুলোকে অপেক্ষা করতে পাঠায়।**

@@ -1,7 +1,5 @@
 # 🔒 Part 2: GIL, Threading & The Reality of Concurrency
 
----
-
 ## 🧠 1. Why This Part Matters
 
 Part 1-এ তুমি শিখেছো:
