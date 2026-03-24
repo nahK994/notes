@@ -7,3 +7,7 @@
 * [Server এর খুঁটিনাটি: Gunicorn, Nginx, Async এর ভিতর-বাহির](server-internals/start.md)
     - [ground 0](server-internals/http-process-model-concurrency.md)
     - [WSGI](server-internals/wsgi.md)
+    - [ASGI](server-internals/asgi.md)
+    - [gunicorn](server-internals/gunicorn.md)
+    - [gunicorn workders](server-internals/gunicorn-workers.md)
+    - [nginx](server-internals/nginx.md)
