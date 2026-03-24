@@ -11,3 +11,7 @@
     - [gunicorn](server-internals/gunicorn.md)
     - [gunicorn workders](server-internals/gunicorn-workers.md)
     - [nginx](server-internals/nginx.md)
+    - [full-stack arch](server-internals/full-stack-architecture.md)
+    - [request lifecyle](server-internals/request-lifecycle.md)
+    - [tradeoff and tuning](server-internals/tradeoff-and-tuning.md)
+    - [decision framework](server-internals/decision-framework.md)
