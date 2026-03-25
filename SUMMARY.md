@@ -1,15 +1,13 @@
 # Table of contents
 
 * [Welcome](README.md)
-* [কনকারেন্সি](concurrency/start.md)
-    - [event loop](concurrency/event-loop-deep-dive.md)
-    - [threading, GIL](concurrency/gil-threading-truth.md)
+* [মাল্টিটাস্কিং](multitasking/multitasking.md)
 * [Server এর খুঁটিনাটি](server-internals/start.md)
     - [ground 0](server-internals/http-process-model-concurrency.md)
     - [WSGI](server-internals/wsgi.md)
     - [ASGI](server-internals/asgi.md)
     - [gunicorn](server-internals/gunicorn.md)
-    - [gunicorn workders](server-internals/gunicorn-workers.md)
+    - [gunicorn workers](server-internals/gunicorn-workers.md)
     - [nginx](server-internals/nginx.md)
     - [full-stack arch](server-internals/full-stack-architecture.md)
     - [request lifecyle](server-internals/request-lifecycle.md)
