@@ -1,262 +1,338 @@
-# 🔒 Part 1:  📦 Event Loop & Asyncio Deep Dive
-
-## 🧠 1. Event Loop — ২ লাইনের সত্য
-
-> **Event loop হলো একটা infinite loop, যেটা ready থাকা task execute করে, আর বাকিগুলোকে অপেক্ষা করতে পাঠায়।**
-
-👉 কিন্তু… এই definition দিয়ে কিছুই বোঝা যায় না 😄 চলো layer খুলে দেখি।
-
-### 🔍 একটু ভেঙে বলি:
-
-Event loop মূলত Python-এর asyncio লাইব্রেরির কেন্দ্রবিন্দু। এটা একটা loop যেটা সারাক্ষণ চলতে থাকে এবং দেখতে থাকে — কোন task এখন run করার জন্য ready আছে। যে task ready, সেটা run করে। যেটা কোনো I/O (যেমন network request, file read) এর জন্য অপেক্ষা করছে, সেটাকে সরিয়ে রাখে এবং অন্য কাজ করে। I/O শেষ হলে সেই task-কে আবার ready queue-তে ফিরিয়ে আনে।
-
-এটা একটা **cooperative multitasking** সিস্টেম — মানে প্রতিটা task নিজে থেকে বলে "আমি এখন অপেক্ষা করছি, তুমি অন্য কাজ করো"। জোর করে কাউকে থামানো হয় না।
+# 🧵 Multitasking, Concurrency, আর Python-এর Asyncio
 
 ---
 
-## ⚙️ 2. Mental Model (Wrong vs Right)
+## 🤔 শুরুটা হোক একটা প্রশ্ন দিয়ে
 
-### ❌ Wrong Model (সবাই প্রথমে এটাই ভাবে)
+ধরো তুমি একটা web app বানিয়েছো। কেউ request করলে তুমি তিনটা জায়গা থেকে data আনো — Weather API, News API, আর Stock API। প্রতিটা API response দিতে ১ সেকেন্ড নেয়।
 
-```
-event loop = queue → কাজ নেয় → execute করে → next
-```
+তোমার app কতক্ষণ নেবে?
 
-👉 **এই model এর সমস্যা কোথায়?**
+সহজ উত্তর: ৩ সেকেন্ড। একটার পর একটা।
 
-- এটা দিয়ে বোঝা যায় না কেন একটা task `await` করলে অন্য task চলতে পারে।
-- I/O কীভাবে handle হয়, সেটা এই model এ অনুপস্থিত।
-- মনে হয় সব কাজ একটার পর একটা — কিন্তু async তো সেটা না।
+কিন্তু একটু ভাবো — তিনটা API-কে তো তুমি একসাথে জিজ্ঞেস করতে পারতে। তাহলে ১ সেকেন্ডেই শেষ হতো। তুমি ২ সেকেন্ড শুধু অপেক্ষায় নষ্ট করলে।
+
+এই "অপেক্ষার সময়টাকে কাজে লাগানো" — এটাই multitasking-এর মূল কথা। আর Python-এ এটা করার নাম **asyncio**।
+
+কিন্তু asyncio বোঝার আগে, একটু পিছিয়ে যাই। কারণ multitasking একটা পুরনো সমস্যা — এবং OS থেকে শুরু করে Python পর্যন্ত সবাই এটা আলাদাভাবে solve করেছে।
 
 ---
 
-### ✅ Correct Model (প্রথম সঠিক ধারণা)
+## 🖥️ Part 1: Multitasking — সমস্যাটা কোথায়?
+
+### কম্পিউটার আসলে একসাথে কী করতে পারে?
+
+তুমি এখন হয়তো browser চালাচ্ছো, music শুনছো, আর background-এ antivirus চলছে। মনে হচ্ছে সব একসাথে হচ্ছে।
+
+কিন্তু যদি তোমার একটাই CPU core থাকে — সে literally একসাথে একটাই কাজ করতে পারে। তাহলে এই "সব একসাথে" ব্যাপারটা হয় কীভাবে?
+
+উত্তর হলো — OS খুব দ্রুত একটা থেকে আরেকটায় switch করছে। এত দ্রুত যে তোমার কাছে একসাথে মনে হচ্ছে। এটাকে বলে **time-slicing**।
+
+```
+CPU এর reality:
+  Browser   → [চলছে 10ms]
+  Music     → [চলছে 10ms]
+  Antivirus → [চলছে 10ms]
+  Browser   → [চলছে 10ms]
+  ...
+```
+
+চোখে দেখলে মনে হবে সব একসাথে — কিন্তু আসলে পালা করে।
+
+এই সমস্যাটা solve করতে OS দুটো mechanism দিয়েছে: **Process** আর **Thread**।
+
+---
+
+### Process — সম্পূর্ণ আলাদা বাড়ি
+
+যখন তুমি Chrome খোলো, OS একটা **process** তৈরি করে। Process মানে হলো একটা সম্পূর্ণ বিচ্ছিন্ন execution environment — নিজের memory, নিজের resources, সব আলাদা।
+
+Chrome আর Spotify দুটো আলাদা process। তারা একে অপরের memory দেখতে পায় না, কথা বলতে পারে না সরাসরি।
+
+```
+Process A (Chrome)     Process B (Spotify)
+┌────────────────┐     ┌────────────────┐
+│ নিজের memory   │     │ নিজের memory   │
+│ নিজের stack    │     │ নিজের stack    │
+│ নিজের heap     │     │ নিজের heap     │
+└────────────────┘     └────────────────┘
+    ↕ OS পাহারা দেয়, কেউ কাউকে ছুঁতে পারবে না
+```
+
+**সুবিধা:** একটা crash করলে আরেকটা মরবে না।
+**অসুবিধা:** তৈরি করতে expensive, memory বেশি খায়, কথা বলানো কঠিন।
+
+---
+
+### Thread — একই বাড়ির আলাদা ঘর
+
+Process-এর ভেতরেই ছোট ছোট execution unit তৈরি করা যায় — এগুলোকে বলে **Thread**।
+
+Chrome-এর ভেতরে একটা thread হয়তো page render করছে, আরেকটা JavaScript চালাচ্ছে, আরেকটা network request করছে। তারা একই memory share করে, তাই কথা বলা সহজ।
+
+```
+Process (Chrome)
+┌──────────────────────────────────┐
+│  Thread 1      Thread 2          │
+│  (Renderer)    (Network)         │
+│      ↕              ↕            │
+│      shared memory (heap)        │
+└──────────────────────────────────┘
+```
+
+**সুবিধা:** হালকা, তৈরি করা সহজ, memory share করে।
+**অসুবিধা:** shared memory মানেই বিপদ — দুটো thread একই জায়গায় একসাথে লিখলে সমস্যা হয়। এটাকে বলে **race condition**।
+
+OS thread manage করে নিজের মতো — যেকোনো সময় একটা thread থামিয়ে আরেকটায় যেতে পারে। Thread-এর কোনো মতামত নেই। এটাকে বলে **preemptive multitasking**।
+
+---
+
+### তাহলে সমস্যা কোথায়?
+
+Process আর Thread — দুটোই OS-এর tool। কিন্তু Python-এ এসে একটা নতুন সমস্যা দেখা দিলো।
+
+ধরো তুমি ১০,০০০ API call করতে চাও concurrently। Thread দিয়ে করলে ১০,০০০ thread তৈরি করতে হবে।
+
+সমস্যা: একটা thread ~১-৮ MB memory নেয়। ১০,০০০ thread = ~৮ GB RAM। আর প্রতিটা thread-এর মধ্যে switch করতে OS-এর সময় লাগে (context switch overhead)।
+
+এই situation-এ Thread কাজের না।
+
+আর এখানেই Python বললো — "আমি নিজেই manage করি।"
+
+---
+
+## 🔀 Part 2: Concurrency vs Parallelism — দুটো আলাদা জিনিস
+
+Asyncio বোঝার আগে এই দুটো concept পরিষ্কার হওয়া দরকার। মানুষ প্রায়ই গুলিয়ে ফেলে।
+
+### একটা রান্নাঘরের উদাহরণ
+
+**Scenario:** তোমাকে চা, ডিম সিদ্ধ, আর toast বানাতে হবে।
+
+**Parallelism — দুজন chef:**
+
+```
+Chef A: চা বানাচ্ছে     ────────────────→ done
+Chef B: ডিম সিদ্ধ করছে ────────────────→ done
+Chef C: toast করছে      ────────────────→ done
+         [সবাই literally একই সময়ে কাজ করছে]
+```
+
+Parallelism মানে literally একই মুহূর্তে একাধিক কাজ — আলাদা আলাদা CPU core-এ, আলাদা আলাদা worker-এ।
+
+**Concurrency — একজন smart chef:**
+
+```
+Chef: কেতলিতে পানি দিলো → [পানি গরম হচ্ছে, অপেক্ষা না করে]
+      ডিম বসালো        → [ডিম সিদ্ধ হচ্ছে, অপেক্ষা না করে]
+      bread দিলো       → [toast হচ্ছে]
+      এখন পানির দিকে গেলো → চা বানালো
+      ডিমের দিকে গেলো   → নামালো
+      toast নামালো
+```
+
+Concurrency মানে একজনই কাজ করছে — কিন্তু smart ভাবে। অপেক্ষার সময়টায় অন্য কাজ সারছে। যেকোনো এক মুহূর্তে একটাই কাজ হচ্ছে, কিন্তু সব কাজ progress করছে।
+
+### সহজ সংজ্ঞা:
+
+| Concept | মানে | উদাহরণ |
+|---|---|---|
+| **Parallelism** | একই সময়ে multiple কাজ, multiple worker | multiprocessing, multiple CPU core |
+| **Concurrency** | multiple কাজ progress করছে, কিন্তু যেকোনো সময়ে একটাই চলছে | asyncio, single thread |
+
+### Python-এ কোনটা কখন?
+
+```
+CPU-heavy কাজ (ভারি calculation, image processing)
+    → Parallelism দরকার
+    → multiprocessing ব্যবহার করো (আলাদা CPU core)
+
+I/O-heavy কাজ (API call, database, file read)
+    → Concurrency যথেষ্ট
+    → asyncio ব্যবহার করো (single thread, smart scheduling)
+```
+
+কেন? কারণ API call করার সময় CPU আসলে কিছুই করছে না — শুধু অপেক্ষা করছে। এই অপেক্ষার সময়টাকে কাজে লাগানোর জন্য আলাদা CPU লাগে না, শুধু smart scheduling দরকার।
+
+---
+
+## ⚙️ Part 3: Python-এর Concurrency — Asyncio
+
+এখন মূল জায়গায় আসি।
+
+Python বললো — Thread ছাড়াই আমি concurrency দিতে পারি। কীভাবে? **Coroutine** আর **Event Loop** দিয়ে।
+
+### Coroutine কী? (Thread-এর সাথে তুলনা)
+
+Thread হলো OS-এর বানানো execution unit। OS যেকোনো সময় থামাতে পারে, চালু করতে পারে।
+
+**Coroutine** হলো Python-এর নিজস্ব execution unit। একটা function যেটা মাঝপথে pause করতে পারে এবং পরে ঠিক সেখান থেকে resume করতে পারে।
+
+```python
+# সাধারণ function — শুরু হয়, শেষ হয়, মাঝে কোনো pause নেই
+def normal_function():
+    print("শুরু")
+    print("শেষ")
+
+# Coroutine — মাঝপথে pause করতে পারে
+async def coroutine():
+    print("শুরু")
+    await asyncio.sleep(1)  # এখানে pause, অন্যরা চলুক
+    print("শেষ")            # পরে এখান থেকে resume
+```
+
+`async def` দিয়ে বানানো function-ই coroutine। এটাকে call করলে সাথে সাথে চলে না — একটা coroutine object তৈরি হয়।
+
+```python
+coro = coroutine()  # এখনো চলেনি, শুধু object তৈরি হয়েছে
+```
+
+| বিষয় | Thread | Coroutine |
+|---|---|---|
+| কে manage করে? | OS | Python / event loop |
+| Switch কখন হয়? | যেকোনো সময় (OS জোর করে) | শুধু `await`-এ (নিজে থেকে) |
+| Memory | ~১-৮ MB প্রতিটায় | ~কয়েক KB প্রতিটায় |
+| কতটা চালানো যায়? | কয়েকশো | হাজার হাজার |
+| Race condition? | সম্ভব | নেই (single thread) |
+
+সবচেয়ে বড় পার্থক্য:
+
+**Thread = preemptive** → OS জোর করে থামায়, coroutine-এর কোনো বলার নেই।
+
+**Coroutine = cooperative** → নিজে `await` দিয়ে বলে "এখন অন্যজন চলুক।" না বললে সে চলতেই থাকবে।
+
+---
+
+### Event Loop — সিডিউলার যে সব manage করে
+
+Coroutine নিজে নিজে চলতে পারে না। কেউ একজন লাগবে যে এদের চালাবে, pause করবে, resume করবে। সেই কেউ হলো **Event Loop**।
+
+Event loop হলো একটা infinite loop যেটা সারাক্ষণ দেখছে — কোন coroutine এখন run করার জন্য ready আছে। সেটা run করে। যেটা I/O-এর জন্য অপেক্ষা করছে, সেটাকে সরিয়ে রাখে। I/O শেষ হলে সেটাকে আবার ready তালিকায় আনে।
 
 ```
 Event Loop
     ↓
-Ready Queue → execute
+Ready Queue → execute (পরবর্তী await পর্যন্ত)
     ↓
-I/O wait → OS
+await পেলে → pause, I/O কাজ OS-এর হাতে দাও
     ↓
-Callback Queue → ready queue
+OS notify করলে → সেই coroutine আবার Ready Queue-তে
+    ↓
+(চক্র চলতে থাকে)
 ```
 
-👉 এখানে ৩টা গুরুত্বপূর্ণ অংশ আছে:
+মনে রাখো: Event loop **scheduler**, worker না। সে নিজে কাজ করে না — ঠিক করে কে কখন কাজ করবে।
 
-1. **Ready Queue** — যেসব task এখনই run করা যাবে, তাদের তালিকা।
-2. **OS (I/O handling)** — যখন কোনো task network বা disk I/O এর জন্য অপেক্ষা করে, Python সেটা OS-এর হাতে দিয়ে দেয়। OS জানিয়ে দেবে কখন কাজ শেষ হবে।
-3. **Callback ফিরে আসা** — OS জানালে পর সেই task আবার ready queue-তে আসে এবং চালু হয়।
-
-**মূল কথা:** Event loop কখনো idle বসে থাকে না। একটা task অপেক্ষায় গেলে সাথে সাথে অন্য task চালু করে।
-
----
-
-## 🧩 3. Execution Flow (Real Timeline)
-
-ধরো এই কোড:
+একটা mental model:
 
 ```python
-async def task():
-    print("A")
-    await asyncio.sleep(2)
-    print("B")
+# Event loop এর কাজ মোটামুটি এরকম (simplified)
+while True:
+    task = ready_queue.pop()
+    task.run()               # পরবর্তী await পর্যন্ত চালাও
+
+    for completed in io_events:   # OS যা complete জানালো
+        ready_queue.push(completed)  # আবার queue-তে দাও
 ```
-
-### 🧠 Timeline — ধাপে ধাপে কী হয়:
-
-```
-t=0 সেকেন্ড : task শুরু হয় → "A" print হয়
-t=0 সেকেন্ড : await asyncio.sleep(2) দেখে → coroutine pause হয়
-t=0 সেকেন্ড : control → event loop-এ ফিরে আসে (অন্য কাজ করতে পারে)
-t=2 সেকেন্ড : sleep শেষ → OS callback পাঠায়
-t=2 সেকেন্ড : task আবার resume হয় → "B" print হয়
-```
-
-### 🔍 এখানে কী শিখলাম?
-
-- `await` করলে **শুধু ওই coroutine থেমে যায়**, পুরো program বা thread বন্ধ হয় না।
-- এই ২ সেকেন্ড ফাঁকে event loop অন্য কাজ করতে পারে।
-- এটাই asyncio-র শক্তি।
 
 ---
 
-## 🎯 Key Insight: `await` মানে কী?
+### `await` — সবচেয়ে গুরুত্বপূর্ণ keyword
+
+`await` মানে: "এই coroutine pause করো, thread না।"
 
 ```
 "এই coroutine pause করো, thread না"
 ```
 
-### 🔍 বিস্তারিত:
-
-`await` keyword দেখলে Python বোঝে — এই জায়গায় কিছু সময় লাগবে (যেমন network call)। তাই coroutine-টাকে pause করো এবং event loop-কে control দাও। Thread কিন্তু ব্লক হয় না, event loop চলতে থাকে।
-
----
-
-## ⚠️ Critical Distinction — Pause vs Block
-
-| জিনিস | কী হয়? |
-|---|---|
-| coroutine | pause হয় (অন্যরা চলতে পারে) |
-| thread | ❌ block হয় না |
-
-### 🔍 ব্যাখ্যা:
-
-- **Coroutine pause** = "আমি অপেক্ষায় আছি, কিন্তু thread ফ্রি আছে"
-- **Thread block** = "পুরো thread আটকে আছে, কেউ কিছু করতে পারছে না"
-
-`await` করলে thread block হয় না — এটাই threading থেকে asyncio-র সবচেয়ে বড় পার্থক্য।
-
----
-
-## 🧵 3.5 Thread vs Coroutine — আসলে পার্থক্যটা কোথায়?
-
-এই দুটো জিনিস মানুষ প্রায়ই গুলিয়ে ফেলে। একবার পরিষ্কার করে নেওয়া দরকার।
-
-### 🔍 Thread কী?
-
-Thread হলো OS-এর একটা execution unit। OS নিজে thread তৈরি করে, schedule করে, এবং forcefully switch করতে পারে। একটা process-এর ভেতরে একাধিক thread একই memory share করে চলতে পারে।
-
-```
-Thread:
-    → OS তৈরি করে ও manage করে
-    → OS যেকোনো সময় switch করতে পারে (preemptive)
-    → নিজস্ব stack আছে (কয়েক MB)
-    → নিজস্ব system-level resource আছে
-    → switch করতে overhead আছে (context switch)
-```
-
-### 🔍 Coroutine কী?
-
-Coroutine হলো Python-এর একটা function যেটা মাঝপথে pause করতে পারে এবং পরে সেখান থেকে resume করতে পারে। এটা OS জানে না — পুরোটা Python-এর নিজস্ব ব্যাপার।
-
-```
-Coroutine:
-    → Python (event loop) তৈরি করে ও manage করে
-    → শুধু await-এ switch হয় (cooperative)
-    → অনেক lightweight (কয়েক KB)
-    → OS-এর কাছে এটা "একটাই thread"-এর কাজ
-    → switch করতে overhead প্রায় নেই
-```
-
-### ⚖️ পাশাপাশি তুলনা:
-
-| বিষয় | Thread | Coroutine |
-|---|---|---|
-| কে manage করে? | OS | Python / event loop |
-| Switch কখন হয়? | যেকোনো সময় (preemptive) | শুধু `await`-এ (cooperative) |
-| Memory খরচ | ~১-৮ MB প্রতিটায় | ~কয়েক KB প্রতিটায় |
-| কতটা চালানো যায়? | কয়েকশো (OS-এর limit) | হাজার হাজার |
-| Race condition? | হ্যাঁ, সম্ভব | না (single thread) |
-| Blocking এ কী হয়? | শুধু ওই thread আটকে | পুরো event loop আটকে |
-
-### 🎯 সবচেয়ে গুরুত্বপূর্ণ পার্থক্য:
-
-**Thread = preemptive** → OS জোর করে থামায়, তুমি কিছু বলো বা না বলো।
-
-**Coroutine = cooperative** → তুমি নিজে `await` দিয়ে বলো "এখন অন্যজন চলুক"। না বললে সে চলতেই থাকবে।
+এটা বোঝাটা critical। `await` করলে:
+- ✅ শুধু এই coroutine থামে
+- ✅ Thread free থাকে
+- ✅ Event loop অন্য coroutine চালাতে পারে
+- ❌ Thread block হয় না
+- ❌ পুরো program থামে না
 
 ```python
-# Thread — OS যেকোনো সময় এটা থামিয়ে অন্যজনকে দিতে পারে
-def thread_task():
-    do_something()  # OS interrupt করতে পারে এখানে
-    do_more()
-
-# Coroutine — শুধু await-এ switch হয়
-async def coro_task():
-    do_something()        # এখানে switch হবে না
-    await some_io()       # এখানেই switch হবে
-    do_more()             # এখানেও switch হবে না
+async def task():
+    print("A")
+    await asyncio.sleep(2)   # শুধু এই coroutine pause, thread free
+    print("B")
 ```
 
-### 🔍 তাহলে কখন Thread, কখন Coroutine?
+Timeline:
 
-- **Coroutine (asyncio)** → I/O-heavy কাজ: API call, database query, file read — হাজারো concurrent connection handle করতে হলে
-- **Thread** → blocking library ব্যবহার করতে হলে যেটা asyncio support করে না, অথবা CPU কাজ অল্প করলে
+```
+t=0s: "A" print হলো
+t=0s: await দেখলো → coroutine pause, control event loop-এ গেলো
+t=0s: event loop এই ফাঁকে অন্য coroutine চালাতে পারছে
+t=2s: sleep শেষ → OS জানালো → coroutine আবার ready queue-তে
+t=2s: "B" print হলো
+```
 
 ---
 
-## 🧠 4. Coroutine Lifecycle
+### Coroutine-এর জীবনচক্র
+
+একটা coroutine তৈরি হয়ে শেষ হওয়া পর্যন্ত কয়েকটা stage পার করে:
 
 ```
 Created → Scheduled → Running → Paused → Resumed → Done
 ```
 
-### Breakdown — প্রতিটা stage কী মানে:
+**Created:** `coro = task()` — object তৈরি হলো, এখনো চলেনি।
 
-#### 1. Created
-```python
-coro = task()
-```
-👉 **এখনো run হয়নি।** শুধু coroutine object তৈরি হয়েছে। `task()` call করা মানে function চালানো না — মানে একটা coroutine object বানানো।
+**Scheduled:** `asyncio.create_task(coro)` — event loop-এর ready queue-তে গেলো। এখনো চলেনি, কিন্তু চলার জন্য line-এ দাঁড়িয়েছে।
 
-#### 2. Scheduled
-```python
-asyncio.create_task(coro)
-```
-👉 **ready queue-তে ঢুকেছে।** Event loop জানলো যে এই coroutine-টা run করতে হবে। কিন্তু এখনই run শুরু হয়নি।
+**Running:** Event loop তুলে নিলো, চালাচ্ছে।
 
-#### 3. Running
-```
-event loop execute করছে
-```
-👉 Event loop ready queue থেকে এই task তুলে নিয়ে execute করছে।
+**Paused:** `await` পেলো → নিজে থেকে pause, control event loop-এ।
 
-#### 4. Paused
-```python
-await something
-```
-👉 **yield back to loop।** কোনো `await` পেলে coroutine নিজে থেকে বলে "আমি থামছি"। Control event loop-এ ফিরে যায়।
+**Resumed:** যার জন্য অপেক্ষা করছিলো সেটা শেষ → আবার ready queue-তে → আবার চলবে।
 
-#### 5. Resumed
-```
-I/O complete হলে
-```
-👉 যার জন্য অপেক্ষা করছিলো সেটা শেষ হলে, OS event loop-কে জানায়। Event loop coroutine-কে আবার ready queue-তে রাখে।
-
-#### 6. Done
-```
-coroutine শেষ — result/exception রিটার্ন করে
-```
+**Done:** শেষ — result বা exception নিয়ে বের হলো।
 
 ---
 
-## 🧠 5. `await` vs `create_task` — Sequential vs Concurrent
+### `await` vs `create_task` — Sequential vs Concurrent
 
-### ❌ Sequential (একটার পর একটা)
+এটাই সবচেয়ে বড় practical পার্থক্য।
 
-```python
-await fetch()
-await process()
-```
-
-```
-fetch → (শেষ) → process শুরু
-```
-
-👉 `fetch` শেষ না হওয়া পর্যন্ত `process` শুরুই হবে না। দুটো কাজ পরপর চলে।
-
----
-
-### ✅ Concurrent (একসাথে চলে)
+**Sequential — একটার পর একটা:**
 
 ```python
-t1 = asyncio.create_task(fetch())
-t2 = asyncio.create_task(process())
-
-await t1
-await t2
+result1 = await fetch_weather()   # শেষ হোক, তারপর
+result2 = await fetch_news()      # এটা শুরু হবে
 ```
 
 ```
-fetch  ─┐
-        ├─ concurrently (একই সময়ে)
-process ┘
+weather ────────────→ done
+                           news ────────────→ done
+[     1s     ]        [     1s     ]
+মোট: ২ সেকেন্ড
 ```
 
-👉 দুটো task-ই schedule হয়ে গেছে। `fetch` যখন অপেক্ষা করছে, তখন `process` চলে। এটাই concurrency।
+`fetch_weather` শেষ না হওয়া পর্যন্ত `fetch_news` শুরুই হবে না।
 
-### 🎯 সহজ মনে রাখার উপায়:
+**Concurrent — একসাথে schedule করো:**
+
+```python
+task1 = asyncio.create_task(fetch_weather())
+task2 = asyncio.create_task(fetch_news())
+
+result1 = await task1
+result2 = await task2
+```
+
+```
+weather ────────────→ done
+news    ────────────→ done   (একই সময়ে চলছে)
+[     1s     ]
+মোট: ১ সেকেন্ড
+```
+
+`create_task` coroutine-কে immediately run করে না — event loop-এর ready queue-তে schedule করে দেয়। তারপর event loop দুটো task interleave করে চালায়। একটা `await`-এ থামলে অন্যটা চলে।
+
+সহজ মনে রাখার উপায়:
 
 ```
 await       → এখনই অপেক্ষা করো (sequential)
@@ -265,439 +341,102 @@ create_task → schedule করো (concurrent)
 
 ---
 
-## 🧠 6. Why Async is Fast (আসল কারণ)
+### OS-এর সাহায্য — epoll/kqueue
 
-👉 async fast **না** কারণ:
-- ❌ parallel execution (একই সময়ে দুই CPU-তে চলছে — এটা না)
-- ❌ multiple thread (এটাও না)
+একটা প্রশ্ন আসতে পারে — asyncio কি আসলে background-এ thread ব্যবহার করে?
 
-👉 async fast **কারণ**:
-```
-no idle waiting — অপেক্ষার সময়টা নষ্ট হয় না
-```
-
-### ❌ Blocking Model (পুরনো পদ্ধতি):
+**না।** Asyncio সরাসরি OS-এর I/O mechanism ব্যবহার করে।
 
 ```
-read file  → (অপেক্ষা) → শেষ
-API call   → (অপেক্ষা) → শেষ
+event loop → OS-কে বলে: "এই connection-এ data আসলে আমাকে জানিও"
+             (OS নিজেই track করে, কোনো thread লাগে না)
+event loop → এই ফাঁকে অন্য কাজ করছে
+OS → "ওই connection ready" → notify
+event loop → সেই coroutine-কে resume করে
 ```
 
-CPU বসে থাকে, I/O-এর জন্য অপেক্ষা করে। এই সময়টা সম্পূর্ণ নষ্ট।
-
-### ✅ Async Model:
-
-```
-read file  → (অপেক্ষা শুরু) → meanwhile অন্য task চলছে → শেষ হলে resume
-```
-
-অপেক্ষার সময়টায় অন্য কাজ হয়। কোনো CPU time নষ্ট হয় না।
-
-### 🔍 বাস্তব উদাহরণ:
-
-ধরো তুমি ১০০টা website থেকে data নামাবে।
-- **Blocking:** একটা নামাও, শেষ হলে পরেরটা — ১০০ × ১ সেকেন্ড = ১০০ সেকেন্ড
-- **Async:** সব ১০০টা একসাথে request পাঠাও, সবার response আসলে process করো — ~১ সেকেন্ড
+Linux-এ এই mechanism-এর নাম **epoll**, macOS-এ **kqueue**। Python-এর asyncio এগুলো নিজে নিজে ব্যবহার করে — তোমাকে manually করতে হয় না।
 
 ---
 
-## 🧠 7. OS-level Magic (epoll/kqueue)
+## 💣 Part 4: ফাঁদগুলো — যেখানে নতুনরা আটকায়
 
-👉 async I/O আসলে thread ব্যবহার করে **না**।
-
-```
-event loop → OS-কে বলে: "এই fd (file descriptor) ready হলে আমাকে জানিও"
-```
-
-### 🔍 fd (file descriptor) কী?
-
-OS-এ প্রতিটা network connection বা file কে একটা নম্বর দিয়ে চেনা হয়, সেটাই fd। Event loop OS-কে বলে — "এই connection-এ data আসলে আমাকে callback দাও।"
-
-### Flow:
-
-```
-fd register করো (OS-এর কাছে)
-    ↓
-event loop অন্য কাজ করতে থাকে
-    ↓
-OS notify করে (data ready)
-    ↓
-callback → ready queue-তে ঢোকে
-    ↓
-event loop সেই task resume করে
-```
-
-### 🔍 epoll vs kqueue কী?
-
-- **epoll** → Linux-এ OS যেভাবে I/O events track করে
-- **kqueue** → macOS/BSD-তে একই কাজ
-
-Python-এর asyncio এগুলো নিজে নিজে ব্যবহার করে — তোমাকে manually করতে হয় না।
-
----
-
-## 💣 Misconception Breaker
-
-```
-async ≠ thread       (thread একাধিক, async single thread)
-async = event-driven (event হলে react করো)
-```
-
-### 🔍 ব্যাখ্যা:
-
-Threading-এ OS একাধিক thread চালায়, তারা simultaneously কাজ করতে পারে।
-Asyncio-তে **একটাই thread**, কিন্তু সে smart ভাবে কাজ ভাগ করে নেয়। Event আসলে সাড়া দেয়, তাই event-driven।
-
----
-
-## 🧠 8. Blocking Code — Silent Killer
+### ফাঁদ ১: Blocking code — silent killer
 
 ```python
 import time
 
 async def handler():
-    time.sleep(3)  # ⚠️ এটা BLOCKING!
+    time.sleep(3)  # ⚠️ মারাত্মক ভুল!
 ```
 
-### Result:
+দেখতে harmless মনে হচ্ছে — কিন্তু এটা পুরো event loop-কে ৩ সেকেন্ড জমিয়ে দেবে।
+
+কেন?
 
 ```
-event loop → BLOCKED 💀
+event loop এই coroutine চালাচ্ছে
+→ time.sleep(3) OS-কে বলে "এই thread ঘুমাক"
+→ event loop ওই thread-এই চলে
+→ thread ঘুমালে event loop-ও ঘুমায়
+→ সমস্ত pending coroutine আটকে যায়
 ```
 
-👉 **কেন এটা এত বিপজ্জনক?**
-
-```
-event loop নিজেই এই task execute করছে
-→ time.sleep() পুরো thread ঘুম পাড়িয়ে দেয়
-→ কোনো yield নেই (await নেই)
-→ event loop control ফিরে পাচ্ছে না
-→ অন্য সব task আটকে গেছে
-```
-
-`time.sleep()` OS-কে বলে "এই thread ৩ সেকেন্ড ঘুমাক" — event loop কিছুই করতে পারে না।
-
-### 🔥 Fix:
+`time.sleep()` thread block করে। `asyncio.sleep()` শুধু coroutine pause করে।
 
 ```python
-await asyncio.sleep(3)  # ✅ এটা NON-BLOCKING
+# ✅ সঠিক
+async def handler():
+    await asyncio.sleep(3)  # thread free, event loop চলছে
 ```
 
-`asyncio.sleep()` coroutine pause করে কিন্তু thread-কে free রাখে। Event loop অন্য কাজ করতে পারে।
-
----
-
-## 🧠 9. Event Loop Internal (Simplified)
-
-```python
-while True:
-    task = ready_queue.pop()       # ready queue থেকে একটা task নাও
-
-    try:
-        task.run()                 # task চালাও (পরবর্তী await পর্যন্ত)
-    except AwaitIO:
-        register_with_os(task)     # I/O এর জন্য OS-কে বলো জানাতে
-
-    for completed in io_events:    # OS যেগুলো জানালো সেগুলো
-        ready_queue.push(completed) # আবার ready queue-তে ঢোকাও
-```
-
-### 🔍 এই pseudo-code থেকে যা বোঝা যায়:
-
-- Event loop একটা `while True` loop — সে কখনো থামে না (program চলা পর্যন্ত)।
-- প্রতিটা task `await` পর্যন্ত চলে, তারপর pause।
-- I/O complete হলে OS জানায়, event loop সেই task ready queue-তে ফেরত দেয়।
-
-### 🎯 সবচেয়ে গুরুত্বপূর্ণ insight:
-
-```
-event loop = scheduler (সিডিউলার), not worker (কাজের লোক না)
-```
-
-Event loop নিজে কাজ করে না, সে ঠিক করে কে কখন কাজ করবে।
-
----
-
-## 🧠 10. Concurrency vs Parallelism
-
-| Concept | মানে কী | উদাহরণ |
-|---|---|---|
-| **Concurrency** | কাজগুলো interleave করে চলে (একটার মাঝে আরেকটা) | asyncio, single thread |
-| **Parallelism** | কাজগুলো literally একই সময়ে চলে (multiple CPU) | multiprocessing |
-
-```
-👉 async      = concurrency  (single thread, smart scheduling)
-👉 multiprocessing = parallelism (multiple CPU cores)
-```
-
-### 🔍 ব্যাখ্যা:
-
-**Concurrency** মানে একই সময়ে অনেক কাজ *progress* করছে, কিন্তু যেকোনো এক মুহূর্তে একটাই চলছে।
-**Parallelism** মানে literally একই মুহূর্তে একাধিক কাজ চলছে — আলাদা CPU core-এ।
-
-Chef analogy:
-- **Concurrency** = একজন chef পেঁয়াজ কাটছে, মাঝে মাঝে চুলায় নজর দিচ্ছে
-- **Parallelism** = দুজন chef আলাদা আলাদা কাজ করছে একই সময়ে
-
----
-
-## 😂 MEME IDEA
-
-```
-"Developer thinking async = parallel"
-         vs
-"Reality: single thread juggling tasks"
-```
-
----
-
-## 🧠 11. Real Limitation
-
-👉 Event loop single thread — মানে:
-
-```
-যেকোনো এক মুহূর্তে মাত্র ১টা task execute হচ্ছে
-```
-
-### 👍 Advantage:
-
-- **Low overhead** — thread তৈরি করা, switch করা — এসব খরচ নেই।
-- **Race condition নেই** — একাধিক thread shared memory access করলে যে সমস্যা হয়, সেটা এখানে নেই।
-- **Simple mental model** — কোড sequential মনে হয়।
-
-### 👎 Disadvantage:
-
-- **Blocking = total freeze** — কোনো একটা task thread block করলে সব আটকে যায়।
-- **CPU-bound কাজে কোনো লাভ নেই** — CPU intensive কাজ (যেমন ভারি calculation) async দিয়ে fast হয় না।
-
----
-
-## 🧠 12. Subtle Trap — CPU Task in Async
+### ফাঁদ ২: CPU-heavy কাজ async-এ
 
 ```python
 async def handler():
-    await fetch()    # ✅ ঠিক আছে — I/O, coroutine pause হবে
-    heavy_cpu()      # ⚠️ বিপদ! CPU-bound কাজ, কোনো await নেই
+    await fetch_data()   # ✅ ঠিক আছে — I/O, pause হবে
+    process_image()      # ⚠️ বিপদ! CPU কাজ, কোনো await নেই
 ```
 
-👉 এখানে async useless হয়ে যায়।
-
-### 💣 কেন?
+`process_image()` যদি ২ সেকেন্ড ধরে ভারি calculation করে — এই পুরো সময় event loop আটকে।
 
 ```
-heavy_cpu() কোনো await করে না
-→ কোনো yield নেই
-→ event loop control পায় না
-→ পুরো loop block
+process_image() → কোনো await নেই → কোনো pause নেই
+→ event loop control পাচ্ছে না
+→ সব pending coroutine অপেক্ষায়
 ```
 
-`fetch()` ঠিকঠাক কাজ করে কারণ সেটা I/O — `await` করে pause হয়। কিন্তু `heavy_cpu()` হলো pure CPU কাজ (যেমন image processing, বড় calculation) — সে কখনো `await` করে না, তাই event loop আটকে যায়।
+Async শুধু তখনই কাজে আসে যখন কাজের মধ্যে **অপেক্ষা** আছে — network, disk, database। Pure CPU কাজে async কোনো সাহায্য করে না।
 
-### 🎯 Fix Direction (preview):
+CPU-heavy কাজের সমাধান আসবে পরের অংশে (`run_in_executor` দিয়ে thread/process pool-এ পাঠানো)।
 
-এই সমস্যার সমাধান আসবে পরের parts-এ:
-- **CPU-bound কাজ** → `asyncio.run_in_executor()` দিয়ে thread pool বা process pool-এ পাঠাও
-- **Thread** → GIL-এর মধ্যে কাজ করে (I/O-bound-এর জন্য ভালো)
-- **Process** → আলাদা Python interpreter, GIL নেই (CPU-bound-এর জন্য ভালো)
+### ফাঁদ ৩: async ≠ parallel
+
+```
+async ≠ thread       (thread একাধিক, async single thread)
+async ≠ parallel     (parallel মানে multiple CPU, async single thread)
+async = event-driven (event হলে react করো)
+```
+
+Async-এ যেকোনো এক মুহূর্তে মাত্র একটা coroutine execute হচ্ছে। দুটো CPU-heavy কাজ async দিয়ে "parallel" করা যাবে না।
 
 ---
 
-## 🧠 13. Mental Model (Final Form)
+## 🌐 Part 5: Real-world — কোথায় asyncio লাগে, কোথায় না
 
-```
-Event Loop:
-    → run ready tasks        (ready queue থেকে task নাও, চালাও)
-    → delegate I/O           (I/O কাজ OS-এর হাতে দাও)
-    → resume completed tasks (OS জানালে সেই task আবার চালু করো)
-    → never block            (নিজে কখনো block হবে না)
-```
+### Use Case 1: একসাথে অনেক API Call
 
-এই চারটা কাজই event loop করে — এটাই তার সম্পূর্ণ দায়িত্ব।
-
----
-
-## 🧪 Self-check Questions — উত্তরসহ
-
-তুমি বুঝেছো কিনা নিজে test করো:
-
-### 1. `await` কি thread block করে?
-
-**না।** `await` শুধু coroutine pause করে। Thread free থাকে, event loop অন্য কাজ করতে পারে।
-
-### 2. async I/O কি thread ব্যবহার করে?
-
-**না।** async I/O OS-এর epoll/kqueue mechanism ব্যবহার করে। OS fd ready হলে event loop-কে notify করে — কোনো extra thread নেই।
-
-### 3. কেন `time.sleep()` dangerous?
-
-কারণ `time.sleep()` পুরো **thread** ঘুম পাড়িয়ে দেয়। Event loop ওই thread-এই চলে, তাই সেও ঘুমিয়ে পড়ে। সমস্ত pending task আটকে যায়। সমাধান: `await asyncio.sleep()` ব্যবহার করো।
-
-### 4. `create_task` কেন concurrency দেয়?
-
-`create_task` coroutine-কে **immediately** run করে না — বরং event loop-এর ready queue-তে **schedule** করে দেয়। তারপর event loop তার নিজের মতো দুটো task interleave করে চালায়। একটা `await`-এ থামলে অন্যটা চলে — এটাই concurrency।
-
----
-
-## 🌐 Real-world Use Cases — Asyncio থাকলে vs না থাকলে
-
-এখানে কিছু বাস্তব API-based scenario দেখবো যেখানে asyncio আসল পার্থক্য তৈরি করে।
-
----
-
-### 🔴 Use Case 1: একসাথে অনেক Third-party API Call
-
-**Scenario:** তোমার একটা app আছে যেটা user-এর জন্য একসাথে Weather API, News API, আর Stock API — তিনটা থেকে data আনে।
-
-**❌ Without asyncio (blocking):**
+**❌ Without asyncio:**
 
 ```python
 import requests
 
-def get_dashboard_data():
-    weather = requests.get("https://api.weather.com/...").json()   # ১ সেকেন্ড অপেক্ষা
-    news    = requests.get("https://api.news.com/...").json()      # ১ সেকেন্ড অপেক্ষা
-    stocks  = requests.get("https://api.stocks.com/...").json()    # ১ সেকেন্ড অপেক্ষা
+def get_dashboard():
+    weather = requests.get("https://api.weather.com/...").json()   # ১s অপেক্ষা
+    news    = requests.get("https://api.news.com/...").json()      # ১s অপেক্ষা
+    stocks  = requests.get("https://api.stocks.com/...").json()    # ১s অপেক্ষা
     return weather, news, stocks
-
-# মোট সময়: ~৩ সেকেন্ড
-```
-
-```
-weather API →→→→→→→→ done
-                          news API →→→→→→→→ done
-                                                stocks API →→→→→→→→ done
-[        1s        ] [        1s        ] [        1s        ]
-```
-
-**✅ With asyncio:**
-
-```python
-import asyncio
-import httpx  # async HTTP client
-
-async def get_dashboard_data():
-    async with httpx.AsyncClient() as client:
-        weather_task = asyncio.create_task(client.get("https://api.weather.com/..."))
-        news_task    = asyncio.create_task(client.get("https://api.news.com/..."))
-        stocks_task  = asyncio.create_task(client.get("https://api.stocks.com/..."))
-
-        weather, news, stocks = await asyncio.gather(weather_task, news_task, stocks_task)
-    return weather.json(), news.json(), stocks.json()
-
-# মোট সময়: ~১ সেকেন্ড (সবচেয়ে slow API-এর সমান)
-```
-
-```
-weather API →→→→→→→→ done
-news API    →→→→→→→→ done     (একই সময়ে)
-stocks API  →→→→→→→→ done
-[        1s        ]
-```
-
-**ফলাফল:** ৩ সেকেন্ড → ১ সেকেন্ড। ৩টা API থাকলে ৩x fast, ১০টা থাকলে ~১০x fast।
-
----
-
-### 🔴 Use Case 2: High-Traffic Web Server
-
-**Scenario:** তোমার FastAPI/aiohttp server-এ প্রতি সেকেন্ডে ১০০০ request আসছে। প্রতিটা request একটা database query করে।
-
-**❌ Without asyncio (blocking server):**
-
-```python
-from flask import Flask
-import psycopg2  # blocking DB driver
-
-app = Flask(__name__)
-
-@app.route("/user/<id>")
-def get_user(id):
-    conn = psycopg2.connect(...)
-    result = conn.execute(f"SELECT * FROM users WHERE id={id}")  # ৫০ms অপেক্ষা
-    return result
-```
-
-```
-Request 1 → DB query (৫০ms অপেক্ষা) → response
-Request 2 → (Request 1 শেষ না হওয়া পর্যন্ত অপেক্ষা!) → DB query → response
-Request 3 → (আরও অপেক্ষা!) → ...
-```
-
-১০০০ concurrent request হলে শেষেরটা অপেক্ষা করবে: ১০০০ × ৫০ms = ৫০ সেকেন্ড!
-
-**✅ With asyncio (async server):**
-
-```python
-from fastapi import FastAPI
-import asyncpg  # async DB driver
-
-app = FastAPI()
-
-@app.get("/user/{id}")
-async def get_user(id: int):
-    conn = await asyncpg.connect(...)
-    result = await conn.fetchrow("SELECT * FROM users WHERE id=$1", id)  # ৫০ms, কিন্তু non-blocking
-    return result
-```
-
-```
-Request 1 → DB query শুরু (await) → অপেক্ষার মধ্যে...
-Request 2 → DB query শুরু (await) → একই সাথে চলছে
-Request 3 → DB query শুরু (await) → একই সাথে চলছে
-...১০০০টাই প্রায় একসাথে চলছে
-সবার response: ~৫০ms
-```
-
-**ফলাফল:** ৫০ সেকেন্ড → ৫০ মিলিসেকেন্ড। এটাই কারণ FastAPI, aiohttp এত fast।
-
----
-
-### 🔴 Use Case 3: Webhook Processor / Event-driven System
-
-**Scenario:** তোমার একটা service আছে যেটা GitHub webhook receive করে, তারপর Slack-এ notify করে, Jira-তে ticket তৈরি করে, আর email পাঠায়।
-
-**❌ Without asyncio:**
-
-```python
-def process_webhook(event):
-    notify_slack(event)   # ২০০ms — Slack API call
-    create_jira(event)    # ৩০০ms — Jira API call
-    send_email(event)     # ১৫০ms — Email service call
-    # মোট: ৬৫০ms
-```
-
-GitHub থেকে ১০টা push event এলে: ১০ × ৬৫০ms = ৬.৫ সেকেন্ড।
-
-**✅ With asyncio:**
-
-```python
-async def process_webhook(event):
-    await asyncio.gather(
-        notify_slack(event),   # ২০০ms
-        create_jira(event),    # ৩০০ms  — একসাথে চলছে
-        send_email(event),     # ১৫০ms
-    )
-    # মোট: ৩০০ms (সবচেয়ে slow-এর সমান)
-```
-
-১০টা event: সবগুলো concurrently process → ~৩০০ms।
-
----
-
-### 🔴 Use Case 4: Rate-limited API Scraping
-
-**Scenario:** তুমি একটা API থেকে ১০,০০০ record নামাবে, কিন্তু API rate limit করে — সেকেন্ডে সর্বোচ্চ ১০টা request।
-
-**❌ Without asyncio:**
-
-```python
-import time, requests
-
-for record_id in range(10000):
-    data = requests.get(f"/api/record/{record_id}")  # ১টা করে
-    process(data)
-    time.sleep(0.1)  # rate limit মানতে
-# ১০,০০০ × ১০০ms = ১০০০ সেকেন্ড (~১৭ মিনিট)
+# মোট: ~৩ সেকেন্ড
 ```
 
 **✅ With asyncio:**
@@ -705,38 +444,82 @@ for record_id in range(10000):
 ```python
 import asyncio, httpx
 
+async def get_dashboard():
+    async with httpx.AsyncClient() as client:
+        weather, news, stocks = await asyncio.gather(
+            client.get("https://api.weather.com/..."),
+            client.get("https://api.news.com/..."),
+            client.get("https://api.stocks.com/..."),
+        )
+    return weather.json(), news.json(), stocks.json()
+# মোট: ~১ সেকেন্ড
+```
+
+৩টা API থাকলে ৩x fast। ১০টা থাকলে ~১০x fast।
+
+---
+
+### Use Case 2: High-Traffic Web Server
+
+প্রতি সেকেন্ডে ১০০০ request, প্রতিটা database query করে (৫০ms লাগে)।
+
+**❌ Blocking server:**
+
+Request 1 → DB query (৫০ms অপেক্ষা) → response
+Request 2 → Request 1 শেষ না হওয়া পর্যন্ত অপেক্ষা!
+
+১০০০ request হলে শেষেরটা অপেক্ষা করবে: ১০০০ × ৫০ms = ৫০ সেকেন্ড।
+
+**✅ Async server (FastAPI/aiohttp):**
+
+```python
+@app.get("/user/{id}")
+async def get_user(id: int):
+    result = await db.fetchrow("SELECT * FROM users WHERE id=$1", id)
+    return result
+```
+
+সব ১০০০ request প্রায় একসাথে DB query করে — কেউ অপেক্ষা করছে, বাকিরা চলছে। সবার response: ~৫০ms।
+
+এটাই কারণ FastAPI এত fast।
+
+---
+
+### Use Case 3: Rate-limited API থেকে বড় data
+
+১০,০০০ record নামাতে হবে, কিন্তু API-এ rate limit — সেকেন্ডে সর্বোচ্চ ১০টা request।
+
+```python
 async def fetch_all():
     semaphore = asyncio.Semaphore(10)  # একসাথে সর্বোচ্চ ১০টা
 
     async def fetch_one(client, record_id):
-        async with semaphore:  # ১০টার বেশি হলে বাকিরা অপেক্ষা করবে
+        async with semaphore:
             return await client.get(f"/api/record/{record_id}")
 
     async with httpx.AsyncClient() as client:
         tasks = [fetch_one(client, i) for i in range(10000)]
         results = await asyncio.gather(*tasks)
     return results
-
-# ১০টা একসাথে চলে → ~১০০ seconds (~১.৫ মিনিট)
-# ১০x faster, rate limit-ও মানছে
 ```
 
-> **`asyncio.Semaphore`** হলো একটা counter যেটা বলে "একসাথে সর্বোচ্চ N টা coroutine এই block-এ ঢুকতে পারবে"। Rate limiting বা resource control-এর জন্য খুব কাজের।
+`asyncio.Semaphore(10)` মানে — একসাথে সর্বোচ্চ ১০টা coroutine এই block-এ ঢুকতে পারবে। বাকিরা বাইরে অপেক্ষা করবে। Rate limit মেনে চলছে, আবার ১০x concurrency-ও পাচ্ছো।
+
+**Blocking approach:** ১০,০০০ × ১০০ms = ১০০০ সেকেন্ড (~১৭ মিনিট)
+**Async approach:** ~১০০ সেকেন্ড (~১.৫ মিনিট)
 
 ---
 
-### 📊 সংক্ষেপে: কোথায় asyncio দরকার, কোথায় না
+### সংক্ষেপে: কোথায় asyncio, কোথায় না
 
 | Situation | Asyncio দরকার? | কারণ |
 |---|---|---|
 | একসাথে অনেক API call | ✅ হ্যাঁ | I/O wait time বাঁচে |
-| High-traffic web server | ✅ হ্যাঁ | হাজারো request concurrent handle |
+| High-traffic web server | ✅ হ্যাঁ | হাজারো concurrent request |
 | Database query (async driver) | ✅ হ্যাঁ | DB wait time-এ অন্য কাজ |
 | একটাই API call | ❌ না | overhead বেশি, লাভ নেই |
 | Image/video processing | ❌ না | CPU-bound, asyncio কাজে আসে না |
 | Simple script | ❌ না | complexity বাড়বে, benefit নেই |
-
-### 🎯 এক কথায়:
 
 ```
 Asyncio শুধু তখনই কাজে আসে যখন তুমি অনেক কিছু "অপেক্ষা" করছো।
@@ -745,23 +528,65 @@ Asyncio শুধু তখনই কাজে আসে যখন তুমি 
 
 ---
 
-## 🎯 Summary (No fluff)
+## 🧠 Part 6: পুরো ছবিটা একসাথে
 
 ```
-asyncio:
-    → single thread          (একটাই thread, কিন্তু smart)
-    → event loop             (scheduler যে task manage করে)
-    → cooperative multitasking (task নিজে yield করে)
-    → non-blocking I/O       (I/O-এর জন্য OS ব্যবহার করে, thread আটকায় না)
+Multitasking
+│
+├── Parallelism (multiple worker, একই সময়ে সত্যিকারের parallel)
+│   └── Python: multiprocessing (আলাদা CPU core, GIL নেই)
+│
+└── Concurrency (single worker, smart scheduling)
+    ├── Thread-based (OS manage করে, preemptive)
+    │   └── Python: threading (GIL আছে, I/O-bound-এ কিছুটা কাজের)
+    │
+    └── Coroutine-based (Python manage করে, cooperative)
+        └── Python: asyncio (event loop, I/O-bound-এর জন্য best)
 ```
+
+Asyncio-র চারটা মূল কাজ:
+
+```
+Event Loop:
+    → run ready coroutines      (ready queue থেকে নাও, চালাও)
+    → delegate I/O to OS        (I/O কাজ OS-এর হাতে দাও)
+    → resume completed tasks    (OS জানালে আবার চালু করো)
+    → never block itself        (নিজে কখনো block হবে না)
+```
+
+---
+
+## ✅ Self-check
+
+### 1. `await` কি thread block করে?
+
+না। `await` শুধু coroutine pause করে। Thread free থাকে, event loop অন্য coroutine চালাতে পারে।
+
+### 2. async I/O কি background-এ thread ব্যবহার করে?
+
+না। OS-এর epoll/kqueue mechanism ব্যবহার করে। OS fd ready হলে event loop-কে notify করে — কোনো extra thread নেই।
+
+### 3. কেন `time.sleep()` dangerous async code-এ?
+
+`time.sleep()` পুরো **thread** ঘুম পাড়িয়ে দেয়। Event loop ওই thread-এই চলে, তাই সেও ঘুমিয়ে পড়ে। সমস্ত pending coroutine আটকে যায়। সমাধান: `await asyncio.sleep()`।
+
+### 4. Concurrency আর Parallelism-এর পার্থক্য কী?
+
+Concurrency: একজন worker, multiple কাজ progress করছে, অপেক্ষার সময় অন্য কাজ সারছে।
+Parallelism: multiple worker, literally একই সময়ে multiple কাজ চলছে।
+
+### 5. CPU-heavy কাজ কি async দিয়ে fast হবে?
+
+না। Async শুধু I/O-bound কাজে কাজে আসে — যেখানে অপেক্ষা আছে। CPU-heavy কাজে multiprocessing দরকার।
 
 ---
 
 ## 🚀 Next Part Preview
 
-👉 Next: **GIL + Threading → why things break**
+👉 Next: **GIL + Threading — কেন Python-এ threading এত complicated**
 
 - GIL (Global Interpreter Lock) কী এবং কেন Python-এ আছে
 - Threading কখন কাজ করে, কখন করে না
-- CPU-bound vs I/O-bound কাজে threading এর আচরণ
+- CPU-bound vs I/O-bound কাজে threading-এর আচরণ
 - কেন GIL থাকলেও threading কিছু ক্ষেত্রে উপকারী
+- এবং কখন সব ছেড়ে multiprocessing-এ যেতে হবে
