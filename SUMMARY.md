@@ -15,3 +15,6 @@
     - [request lifecyle](server-internals/request-lifecycle.md)
     - [tradeoff and tuning](server-internals/tradeoff-and-tuning.md)
     - [extension](server-internals/extension.md)
+* [Operating System](os/start.md)
+    - [Chapter 4: The Abstraction: The Process](os/chapter_4.md)
+    - [Chapter 5: Process API](os/chapter_5.md)
