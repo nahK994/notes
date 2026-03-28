@@ -1,266 +1,563 @@
-# 🐾 Module 4: Gunicorn Worker Zoo
+# Module 2 — Mini Challenge: Solution
 
----
-
-## Module 2-এর Mini Challenge-এর উত্তর
-
-আগের module শেষে প্রশ্ন ছিল:
-
-> 1 Uvicorn worker, async code, 5টা request একসাথে — প্রতিটায় 1 সেকেন্ড DB + 1 সেকেন্ড API await।
-
-**প্রশ্ন ১ — সব 5টা request শেষ হতে কত সময়?**
-
-প্রায় **2 সেকেন্ড**।
-
-কেন? কারণ সব 5টা request প্রায় একসাথে শুরু হয়। প্রতিটা DB query await করার সময় event loop বাকিগুলোকেও DB query-তে পাঠিয়ে দেয়। 1 সেকেন্ড পর সবার DB response আসে, সবাই API call করে await করে। আরও 1 সেকেন্ড পর সবার API response আসে। মোট ≈ 2 সেকেন্ড।
+## 🧩 Problem Setup
 
 ```
-t=0s    → 5টা request শুরু, সবাই DB query করে await
-t=1s    → সবার DB response আসে, সবাই API call করে await
-t=2s    → সবার API response আসে, সবাই শেষ
+1টা async worker
+5টা request একসাথে আসে
+প্রতিটা request:
+    → DB await  = 1s
+    → API await = 1s
 ```
 
-**প্রশ্ন ২ — WSGI sync worker-এ কত সময় লাগত?**
+---
 
-Sequential হতো, তাই **10 সেকেন্ড**।
-Request 1 শেষ (2s) → Request 2 শেষ (2s) → ... → Request 5 শেষ (2s) = 5 × 2 = 10s।
+## প্রশ্ন ১ — Total time কত?
 
-**প্রশ্ন ৩ — Performance gain কোথা থেকে এলো?**
+**উত্তর: ~2 seconds**
 
-I/O wait-এর সময় থেকে। প্রতিটা request মোট 2 সেকেন্ডের মধ্যে 2 সেকেন্ডই wait করছিল — DB-র জন্য 1 সেকেন্ড, API-র জন্য 1 সেকেন্ড। CPU সেই সময় কিছুই করছিল না।
+### কীভাবে?
 
-WSGI-তে worker এই idle সময়েও occupied ছিল। ASGI-তে event loop এই idle সময়ে বাকি request গুলোর কাজ এগিয়ে নিয়ে গেছে।
+```
+t=0s  → 5টা request একসাথে start হলো
+        → সবাই DB await-এ গেলো (coroutine pause, GIL ছাড়লো)
+        → event loop সবার জন্য I/O OS-এর কাছে register করলো
+
+t=1s  → সবার DB done হলো (প্রায় একসাথে)
+        → সবাই API await-এ গেলো (আবার pause)
+
+t=2s  → সবার API done → সবাই complete ✅
+```
+
+কারণটা পরিষ্কার — প্রতিটা `await`-এ coroutine pause হয়, event loop অন্য request-কে সুযোগ দেয়। তাই ৫টা request-এর waiting time একে অপরের সাথে **overlap** করে। ৫ গুণ সময় লাগে না, সবার অপেক্ষাটা একসাথে হয়।
 
 ---
 
-এখন একটা প্রশ্ন স্বাভাবিকভাবেই আসে — ASGI এবং event loop বুঝলাম, কিন্তু production-এ Gunicorn ব্যবহার করলে worker কীভাবে configure করব? কোন worker type বেছে নেব? এই সিদ্ধান্তটাই Module 4-এর বিষয়।
+## প্রশ্ন ২ — যদি sync হতো?
+
+```
+Req1 → DB(1s) + API(1s) = 2s   [0s  → 2s]
+Req2 → DB(1s) + API(1s) = 2s   [2s  → 4s]
+Req3 → DB(1s) + API(1s) = 2s   [4s  → 6s]
+Req4 → DB(1s) + API(1s) = 2s   [6s  → 8s]
+Req5 → DB(1s) + API(1s) = 2s   [8s  → 10s]
+```
+
+**Total = 10 seconds**
+
+Sync-এ একটা request শেষ না হওয়া পর্যন্ত পরেরটা শুরুই হতে পারে না। CPU প্রতিটা wait-এর সময় বসে থাকে — ওই সময়টা সম্পূর্ণ নষ্ট।
 
 ---
 
-## কেন Worker Type এত গুরুত্বপূর্ণ?
+## প্রশ্ন ৩ — Performance gain কোথায়?
 
-Gunicorn নিজে কোনো request process করে না। সে শুধু একজন manager — request আসলে কোন worker-কে দেবে, worker crash করলে restart দেবে, graceful shutdown করবে। আসল কাজটা করে worker।
+**উত্তর: Waiting time overlap হয়েছে।**
 
-এখন worker কীভাবে কাজ করবে — blocking না non-blocking, thread-based না event loop-based — এটা নির্ভর করে তুমি কোন worker type বেছে নিয়েছ। একই Gunicorn-এ worker type বদলালে পুরো execution model বদলে যায়।
+```
+Sync model:
+Req1: [DB wait]─[API wait]
+Req2:                     [DB wait]─[API wait]
+Req3:                                         [DB wait]─[API wait]
+      |──────────────── 6s (3 request) ──────────────────────────|
 
-এটা ঠিক যেন একটা restaurant-এ manager একই থাকে, কিন্তু staff কীভাবে কাজ করে সেটা বদলে দিলে restaurant-এর পুরো serving capacity বদলে যায়।
+Async model:
+Req1: [DB wait]─[API wait]
+Req2: [DB wait]─[API wait]   ← একই সময়ে
+Req3: [DB wait]─[API wait]   ← একই সময়ে
+      |──────── ~2s ─────────|
+```
+
+> **Core Insight:**
+> ```
+> async = idle time reuse
+> ```
+> CPU যখন একটার জন্য অপেক্ষা করছে, সেই সময়টায় অন্যটাকে এগিয়ে দেওয়া হচ্ছে।
+> Async কোনো magic না — শুধু অপেক্ষার সময়গুলো চালাকভাবে ব্যবহার করা।
+
+---
+---
+
+# Module 3 — Gunicorn: The Process Orchestrator
+
+## 3.1 Gunicorn কী?
+
+Gunicorn হলো Python web application-এর জন্য একটা **process manager** — সে নিজে HTTP parse করে না, application-ও চালায় না। সে শুধু worker process তৈরি করে, সেগুলো বাঁচিয়ে রাখে, আর incoming request সেগুলোর মধ্যে ভাগ করে দেয়।
+
+একটা orchestra-র conductor-এর মতো ভাবো — সে নিজে কোনো instrument বাজায় না, কিন্তু সব musician (worker) কখন কীভাবে বাজাবে সেটা সে নিয়ন্ত্রণ করে।
+
+### ❗ Common Misconception
+
+```
+Gunicorn = web server ❌
+
+Gunicorn = process manager ✅
+    → worker spawn করে
+    → worker monitor করে (crash করলে restart)
+    → request worker-দের মধ্যে distribute করে
+```
+
+Nginx বা Caddy যেখানে actual HTTP connection handle করে (TLS, static files, reverse proxy), Gunicorn সেখানে **শুধু Python process manage করে।** Production-এ সাধারণত `Nginx → Gunicorn → App` এই chain থাকে।
 
 ---
 
-# 🪵 4.1 Sync Worker — The Baseline
+## 3.2 Architecture
 
-এটাই Gunicorn-এর default worker। কোনো `-k` flag না দিলে এটাই চলে।
+```
+Client Request
+      ↓
+   Nginx (reverse proxy, optional)
+      ↓
+  Gunicorn Master Process
+      ↓        ↓        ↓
+  Worker 1  Worker 2  Worker 3
+      ↓        ↓        ↓
+   App       App       App
+      ↓        ↓        ↓
+  Response  Response  Response
+```
+
+### দুটো মূল component:
+
+**Master Process**
+- Worker তৈরি করে (spawn)
+- Worker-দের monitor করে — crash করলে নতুন spawn করে
+- Signal handle করে (graceful shutdown, reload)
+- নিজে কোনো request handle করে না
+
+**Worker Process**
+- Actual request handle করে
+- Worker-এর ভেতরে কী হবে সেটা নির্ভর করে **worker type**-এর উপর
+
+---
+
+## 3.3 Worker Classification — আসল ছবিটা
+
+এটাই সবচেয়ে বেশি confusing অংশ। Worker type বোঝার আগে একটা প্রশ্ন: **"একটা worker একসাথে কতটা request handle করতে পারে?"** — এই প্রশ্নের উত্তরই worker classification।
+
+```
+Gunicorn Worker Types
+│
+├── Sync Workers          → একটা request at a time
+│   └── sync (default)
+│
+├── Thread-based Workers  → একাধিক thread, OS-managed concurrency
+│   └── gthread
+│
+└── Async Workers         → event loop বা greenlet, cooperative concurrency
+    ├── gevent            (greenlet-based, monkey patching)
+    ├── eventlet          (greenlet-based, monkey patching)
+    └── UvicornWorker     (asyncio-based, modern)
+```
+
+**gthread একটা thread-based worker — async worker না।**
+
+এটা OS thread ব্যবহার করে, event loop না। একটু পরে বিস্তারিত দেখবো।
+
+---
+
+## 3.4 প্রতিটা Worker Type — ভেতর থেকে দেখো
+
+### 🔵 Sync Worker (default)
 
 **কীভাবে কাজ করে:**
 
-একটা sync worker মানে একটা Python process। এই process একটাই request নেয়, শেষ করে, তারপর পরেরটা নেয়। সম্পূর্ণ sequential।
-
 ```
-Worker 1: [Request A শুরু → process → DB wait → response] [Request B শুরু → ...]
+Worker Process
+└── Single Thread
+    └── Request A চলছে...
+        └── DB query (blocking — thread আটকে)
+        └── API call (blocking — thread আটকে)
+        └── Response
+    └── এখন Request B নেবে (A শেষ হওয়ার পর)
 ```
 
-Request A-এর DB wait-এর সময় Worker 1 আটকে আছে। নতুন request নিতে পারছে না।
+**Request flow:**
+```
+Request আসলো → Worker নিলো → process করলো (blocking) → Response → পরের Request
+```
 
-**কখন ভালো:**
+**মূল কথা:** একটাই thread, একটাই request। যতক্ষণ request শেষ না হয়, worker অপেক্ষায়।
 
-Sync worker-এর সুবিধা হলো সরলতা। Debug করা সহজ, race condition নেই, কোড যেভাবে লেখা আছে সেভাবেই চলে। Traffic কম থাকলে এবং কাজটা CPU-heavy হলে (image processing, heavy calculation) — এখানে async দিয়ে কিছু লাভ নেই, sync worker-ই সঠিক।
-
-**কখন সমস্যা:**
-
-High traffic এবং I/O-heavy app-এ sync worker-এর concurrency সীমাবদ্ধতা ধরা পড়ে। Worker বাড়ালে memory বাড়ে, কিন্তু প্রতিটা worker তখনও I/O wait-এ idle।
-
-```bash
-gunicorn -w 4 myapp:app   # 4টা sync worker
+**কখন ব্যবহার করবো:**
+```
+✅ Simple CRUD app যেখানে load বেশি না
+✅ App-এ blocking library আছে, async করা সম্ভব না
+✅ Debug করা সহজ লাগবে (sequential behavior)
+❌ High concurrency দরকার হলে
+❌ I/O-heavy app (DB/API call বেশি) হলে
 ```
 
 ---
 
-# 🧵 4.2 Gthread Worker — Thread দিয়ে Concurrency
-
-Sync worker-এর সীমাবদ্ধতা কাটাতে সহজ পরের ধাপ হলো threading। Gthread worker-এ একটা process-এর ভেতরে multiple thread থাকে। প্রতিটা thread আলাদা request handle করে।
+### 🟡 gthread Worker (Thread-based)
 
 **কীভাবে কাজ করে:**
 
 ```
-Worker (1 process):
-  ├── Thread 1: [Request A — DB wait করছে]
-  ├── Thread 2: [Request B — processing]
-  └── Thread 3: [Request C — শুরু হলো]
+Worker Process
+└── Thread Pool (--threads N দিয়ে control করো)
+    ├── Thread 1 → Request A (DB wait-এ আছে, GIL ছেড়েছে)
+    ├── Thread 2 → Request B (চলছে, GIL নিয়েছে)
+    └── Thread 3 → Request C (API wait-এ আছে, GIL ছেড়েছে)
 ```
 
-Request A যখন DB-র জন্য wait করছে, Thread 1 blocked — কিন্তু Thread 2 এবং Thread 3 চলছে। ফলে একটা worker-এ একাধিক request simultaneously progress করতে পারে।
-
-**GIL-এর বাস্তবতা:**
-
-Python-এর GIL থাকায় একসাথে একটাই thread Python bytecode চালাতে পারে। তাহলে কি threading কোনো কাজে আসে না?
-
-আসে — I/O-bound কাজে। DB query করার সময় thread OS-এর কাছে network call পাঠিয়ে block হয়ে যায়, এই সময় GIL release হয় এবং অন্য thread Python code চালাতে পারে। তাই I/O-heavy workload-এ gthread sync worker-এর তুলনায় অনেক বেশি efficient।
-
-CPU-bound কাজে (ভারী calculation) gthread কোনো সুবিধা দেয় না — GIL-এর কারণে threads সত্যিকারের parallel চলে না।
-
-```bash
-gunicorn -k gthread --threads 4 -w 2 myapp:app
-# 2 worker, প্রতি worker-এ 4 thread = মোট 8 concurrent request
+**Request flow:**
+```
+Request আসলো → Thread Pool-এর idle thread নিলো → process করলো → Response
+              (কোনো thread idle না থাকলে queue-তে অপেক্ষা)
 ```
 
-**কখন ভালো:**
+**gthread কি async?** না।
 
-Legacy codebase যেখানে async করা সম্ভব না, কিন্তু concurrency দরকার। Sync code যেটা I/O করে — gthread দিয়ে সহজেই concurrency বাড়ানো যায়, code পরিবর্তন না করেই।
+gthread OS thread ব্যবহার করে — event loop না। কিন্তু I/O-bound কাজে (DB, API call) GIL release হয়, তাই multiple thread effectively concurrent হতে পারে। এটাকে বলে **thread-based concurrency** — cooperative নয়, OS-managed।
+
+```
+Sync worker:  1 worker → 1 request (always)
+gthread:      1 worker → N request (thread count পর্যন্ত, I/O-bound হলে)
+```
+
+**GIL-এর সাথে সম্পর্ক:**
+```
+CPU-bound কাজ:
+    → GIL release হয় না
+    → threads একসাথে চলতে পারে না
+    → gthread এখানে sync-এর চেয়ে ভালো না, বরং overhead বাড়ে
+
+I/O-bound কাজ (DB query, API call, file read):
+    → I/O শুরু হলে GIL release হয়
+    → অন্য thread চলতে পারে
+    → gthread এখানে কাজ করে ✅
+```
+
+**কখন ব্যবহার করবো:**
+```
+✅ App blocking library ব্যবহার করছে (যেমন psycopg2, requests)
+✅ App-কে async-এ migrate করা এখনো সম্ভব না
+✅ I/O-bound কাজ আছে, কিন্তু async লেখা হয়নি
+❌ CPU-bound কাজে (GIL-এর কারণে কোনো benefit নেই)
+❌ App async হলে (UvicornWorker অনেক বেশি efficient)
+```
 
 ---
 
-# ⚡ 4.3 UvicornWorker — True Async
-
-এটা ASGI worker। Gunicorn-কে process manager হিসেবে রেখে প্রতিটা worker Uvicorn-এর event loop দিয়ে চলে।
+### 🟠 gevent / eventlet Worker (Greenlet-based Async)
 
 **কীভাবে কাজ করে:**
 
-একটা worker মানে একটা event loop। সেই event loop-এ শত শত coroutine একসাথে চলতে পারে। কোনো request await করলে event loop অন্যটা resume করে।
-
 ```
-Worker (1 event loop):
-  Coroutine A: await db_query()  ← pause
-  Coroutine B: processing        ← running
-  Coroutine C: await api_call()  ← pause
-  Coroutine D: await db_query()  ← pause
-  ... (আরও অনেক)
+Worker Process
+└── gevent Event Loop (libev/libuv based)
+    ├── Greenlet A → DB query → yield → paused
+    ├── Greenlet B → চলছে
+    └── Greenlet C → API call → yield → paused
 ```
 
-Thread-based approach-এ প্রতিটা concurrent request-এর জন্য একটা thread লাগে। Thread-এর memory overhead আছে। Event loop-এ হাজারো coroutine একটা thread-এই চলে — memory overhead অনেক কম।
+Greenlet হলো Python-এর একটা lightweight coroutine — asyncio coroutine-এর মতো, কিন্তু ভিন্ন implementation।
 
-**সবচেয়ে বড় শর্ত:**
-
-UvicornWorker-এর পুরো সুবিধা পেতে পুরো code stack async হতে হবে। একটাও blocking call থাকলে সেই request-এর সময় পুরো event loop আটকে যায়।
-
-- ✅ `asyncpg`, `databases` — async DB driver
-- ✅ `httpx`, `aiohttp` — async HTTP client
-- ❌ `psycopg2`, `requests` — blocking, event loop আটকাবে
-
-```bash
-gunicorn -k uvicorn.workers.UvicornWorker -w 4 myapp:app
-# 4টা async worker, প্রতিটায় event loop
-```
-
----
-
-# 🌿 4.4 Gevent Worker — Green Threads-এর Magic
-
-Gevent একটু আলাদা ধরনের solution। এটা "green threads" বা greenlet ব্যবহার করে।
-
-**Greenlet কী?**
-
-Greenlet হলো user-space-এ lightweight coroutine — OS thread না, Python-level cooperative multitasking। অনেকটা asyncio coroutine-এর মতো, কিন্তু পার্থক্য হলো gevent-এ তুমি `await` লিখতে হয় না।
-
-**Monkey Patching — Gevent-এর আসল কৌশল:**
-
-Gevent একটা কাজ করে যেটাকে বলে "monkey patching।" এটা Python-এর standard library-র blocking functions গুলো (socket, time.sleep, ইত্যাদি) চুপচাপ replace করে দেয় non-blocking version দিয়ে।
+**Monkey Patching — এটাই gevent-এর বড় trick:**
 
 ```python
-# gevent চালু হলে এটা automatically হয়
+# gevent worker চালু হলে এটা automatically হয়:
 import gevent.monkey
 gevent.monkey.patch_all()
 
-# এরপর এই code async-এর মতো behave করে
-import time
-time.sleep(5)  # আর blocking না, gevent handle করবে
+# এরপর থেকে:
+time.sleep()        → আসলে gevent sleep (non-blocking)
+socket.connect()    → আসলে gevent socket (non-blocking)
+requests.get()      → আসলে gevent-patched (non-blocking)
 ```
 
-ফলে তোমার পুরনো sync code — Django view, পুরনো DB library — কোনো পরিবর্তন ছাড়াই async-like concurrency পায়।
+অর্থাৎ তোমার blocking code না বদলেও gevent সেগুলোকে non-blocking করে দেয়। এটা powerful, কিন্তু কিছু library-তে ঠিকঠাক কাজ নাও করতে পারে।
 
-**সুবিধা এবং সমস্যা:**
+**কখন ব্যবহার করবো:**
+```
+✅ Legacy app (Django, Flask) যেটা async করা কঠিন
+✅ Monkey patching-এ কোনো সমস্যা নেই
+✅ I/O-heavy কিন্তু async rewrite করার সময় নেই
+❌ New project হলে — UvicornWorker ব্যবহার করো
+❌ Library monkey patching support না করলে
+```
 
-সুবিধা হলো legacy code migrate না করেই concurrency বাড়ানো যায়। বড় পুরনো Django app-এ এটা অনেক সময় বাঁচায়।
+---
 
-সমস্যা হলো hidden complexity। Code দেখে বোঝা যায় না কোথায় context switch হচ্ছে। Bug হলে trace করা কঠিন। এবং monkey patching সব library-র সাথে compatible না — কোনো library gevent-এর patch-এর সাথে মিলতে না পারলে mysterious crash হয়।
+### 🟢 UvicornWorker (asyncio-based Async — Modern)
+
+**কীভাবে কাজ করে:**
+
+```
+Worker Process
+└── asyncio Event Loop (Python built-in)
+    ├── Coroutine A → await DB → paused
+    ├── Coroutine B → await API → paused
+    ├── Coroutine C → running
+    └── ... হাজারো coroutine possible
+```
+
+এটা Python-এর native `asyncio` ব্যবহার করে। gevent-এর মতো monkey patching নেই — তোমাকে explicitly `async/await` দিয়ে code লিখতে হবে।
+
+**গুরুত্বপূর্ণ পার্থক্য gevent-এর সাথে:**
+
+```
+gevent:        monkey patching → blocking code চলে (automatically non-blocking হয়)
+UvicornWorker: explicit async  → তোমাকে async code লিখতে হবে
+               blocking code রাখলে পুরো event loop block হবে ⚠️
+```
+
+**কখন ব্যবহার করবো:**
+```
+✅ FastAPI, Starlette, Litestar — এই frameworks-এর জন্য এটাই standard
+✅ New async Python app
+✅ High concurrency I/O-heavy app (হাজারো concurrent request)
+✅ WebSocket, SSE, long-polling দরকার হলে
+❌ Blocking library আছে এবং async alternative নেই
+❌ App sync দিয়ে লেখা (gevent বা gthread বেশি সহজ হবে)
+```
+
+---
+
+## 3.5 পাশাপাশি তুলনা
+
+| Worker | Type | Concurrency কীভাবে? | একটা worker কতটা request? | App লেখার requirement |
+|---|---|---|---|---|
+| `sync` | Sequential | নেই | ১টা | Normal sync code |
+| `gthread` | Thread-based | OS thread, GIL-bounded | N (thread count) | Normal sync code |
+| `gevent` | Async (greenlet) | Cooperative (monkey patch) | হাজারো | Normal sync code (auto-patched) |
+| `UvicornWorker` | Async (asyncio) | Cooperative (explicit) | হাজারো | async/await দিয়ে লিখতে হবে |
+
+**"Cooperative" মানে কী?**
+```
+Cooperative (async workers):
+    → task নিজে বলে "আমি অপেক্ষায় আছি, তুমি চলো" (yield/await)
+    → কেউ জোর করে থামায় না
+    → blocking code থাকলে সবাই আটকে যায়
+
+OS-managed (gthread):
+    → OS নিজে thread switch করে
+    → কেউ yield না করলেও OS থামিয়ে দিতে পারে
+    → blocking code থাকলে শুধু ওই thread আটকে, বাকিরা চলে
+```
+
+---
+
+## 3.6 Scaling Strategy
+
+### Workers বাড়ানো — Parallelism
 
 ```bash
-gunicorn -k gevent -w 4 myapp:app
+gunicorn -w 4 app:app
+```
+
+```
+Master
+├── Worker 1  ← আলাদা process, আলাদা Python interpreter, আলাদা GIL
+├── Worker 2  ← আলাদা process, আলাদা Python interpreter, আলাদা GIL
+├── Worker 3  ← আলাদা process, আলাদা Python interpreter, আলাদা GIL
+└── Worker 4  ← আলাদা process, আলাদা Python interpreter, আলাদা GIL
+```
+
+- প্রতিটা worker আলাদা OS process → true parallelism
+- ৪টা CPU core থাকলে ৪টা request literally একসাথে চলতে পারে
+- কিন্তু প্রতিটা worker আলাদা memory নেয় → **memory expensive**
+
+**Rule of thumb:** `workers = (2 × CPU cores) + 1`
+
+### gthread দিয়ে Thread বাড়ানো
+
+```bash
+gunicorn -k gthread --threads 4 app:app
+```
+
+```
+Worker Process (১টা)
+└── Thread Pool
+    ├── Thread 1 → Request A (DB wait → GIL released)
+    ├── Thread 2 → Request B (চলছে)
+    ├── Thread 3 → Request C (API wait → GIL released)
+    └── Thread 4 → idle
+```
+
+একটা worker-এ বেশি concurrency, memory কম।
+
+### Async Worker — High Concurrency-র জন্য
+
+```bash
+gunicorn -k uvicorn.workers.UvicornWorker -w 2 app:app
+```
+
+```
+Master
+├── Worker 1 (event loop) → ১০০০+ concurrent coroutine
+└── Worker 2 (event loop) → ১০০০+ concurrent coroutine
+```
+
+২টা worker, কিন্তু প্রতিটা হাজারো request concurrently handle করতে পারে। **App async হতে হবে।**
+
+---
+
+## 3.7 Common Mistake — "Workers বাড়ালেই সব ঠিক হয়"
+
+```bash
+gunicorn -w 32 app:app   # ❌ এটা করো না
+```
+
+**কেন এটা ভুল?**
+
+```
+প্রতিটা worker → আলাদা Python process → আলাদা memory
+32 workers × 100MB (app memory) = 3.2 GB RAM শুধু idle worker-এর জন্য!
+
+CPU core যদি ৪টা থাকে:
+32 worker কিন্তু ৪টার বেশি একসাথে চলতে পারবে না
+→ context switching overhead বাড়বে
+→ performance কমবে
+```
+
+**সঠিক approach:**
+```
+bottleneck কোথায় সেটা আগে বোঝো, তারপর tool বেছে নাও।
 ```
 
 ---
 
-# 📊 4.5 চারটা Worker পাশাপাশি
+## 3.8 Bottlenecks — কোথায় কোথায় আটকে যায়
 
-| Worker | Concurrency কীভাবে | Blocking হলে কী হয় | সবচেয়ে ভালো কোথায় |
-|--------|-------------------|--------------------|--------------------|
-| sync | একটাই request | শুধু সেই request আটকায় | Simple app, CPU-heavy |
-| gthread | Thread-এ | সেই thread আটকায় | Legacy code, mixed workload |
-| gevent | Green thread-এ | অন্য greenlet চলে | Legacy async, পুরনো Django |
-| uvicorn | Event loop-এ | পুরো event loop আটকায় | Modern async app, high concurrency |
-
-একটা important pattern লক্ষ্য করো: sync এবং gthread-এ blocking হলে শুধু সেই unit (worker বা thread) আটকায়, বাকিরা চলে। UvicornWorker-এ blocking হলে পুরো event loop আটকায় — এটা আরও বিপজ্জনক। এজন্যই async world-এ blocking code এত সতর্কতার বিষয়।
-
----
-
-# 🧠 4.6 Worker বাড়ালেই কি সমস্যা সমাধান হয়?
-
-একটা common ভুল হলো — "performance কম? আরও worker দাও।"
-
-এটা সত্যি শুধু তখন যখন bottleneck CPU। কিন্তু যদি code-এর execution model ভুল হয় — sync code দিয়ে I/O-heavy app, বা async code-এ blocking call — তাহলে worker বাড়িয়ে শুধু memory বাড়বে, performance নয়।
-
-ধরো প্রতিটা request 2 সেকেন্ড DB wait করে। 10টা sync worker দিলে একসাথে 10টা request handle হবে, কিন্তু প্রতিটা worker সেই 2 সেকেন্ড idle বসে থাকবে। Async করলে 1টা worker-এই এই 10টা request 2 সেকেন্ডে শেষ হতে পারত।
-
-সঠিক approach:
-1. প্রথমে workload বোঝো — I/O-bound নাকি CPU-bound?
-2. তারপর execution model বেছে নাও
-3. তারপর worker count optimize করো
-
----
-
-# 🎯 Worker বেছে নেওয়ার Framework
-
-**ধাপ ১ — App কী ধরনের কাজ করে?**
-
-I/O-heavy (DB, external API, cache) → async বা thread-based approach।
-CPU-heavy (image processing, ML inference) → multiple process, sync worker।
-
-**ধাপ ২ — Codebase কী async-ready?**
-
-Modern async code (`async def`, async libraries) → UvicornWorker।
-পুরনো sync code, migrate করা সম্ভব না → gthread বা gevent।
-
-**ধাপ ৩ — Complexity কতটুকু নিতে পারব?**
-
-Debug সহজ রাখতে চাই, traffic moderate → sync বা gthread।
-Maximum performance, team async-comfortable → UvicornWorker।
-Legacy code কিন্তু async চাই, trade-off accept করতে পারি → gevent।
-
----
-
-# 🎯 Final Mental Model
-
-Gunicorn হলো manager, worker হলো execution brain। Brain বদলালে পুরো system-এর behaviour বদলায়।
+### CPU-bound bottleneck
 
 ```
-Gunicorn (manager)
-    ├── sync worker    → sequential, predictable
-    ├── gthread worker → thread-per-request, I/O-friendly
-    ├── gevent worker  → green threads, legacy-friendly
-    └── uvicorn worker → event loop, maximum concurrency
+app-এ heavy calculation আছে (ML inference, image processing)
+→ async worker কোনো সাহায্য করবে না (CPU কাজ করছে, অপেক্ষা নেই)
+→ workers বাড়াও (আলাদা process = আলাদা GIL = true parallel)
+→ workers = CPU core count-এর কাছাকাছি রাখো
 ```
 
-Production-এ সবচেয়ে common modern setup: `gunicorn -k uvicorn.workers.UvicornWorker -w {cpu_count}` — Gunicorn process management করছে, Uvicorn async execution করছে, worker count CPU core-এর সমান।
+### GIL bottleneck (gthread + CPU-heavy)
+
+```
+gthread ব্যবহার করছো + CPU-heavy কাজ আছে
+→ একাধিক thread GIL-এর জন্য fight করবে
+→ context switch overhead বাড়বে, performance কমবে
+→ Solution: workers বাড়াও (process = আলাদা GIL)
+```
+
+### Event loop block (async worker + blocking code)
+
+```
+UvicornWorker ব্যবহার করছো, কিন্তু কোথাও blocking code আছে:
+    time.sleep(5)        ← পুরো event loop freeze
+    requests.get(url)    ← blocking HTTP call
+    open("file").read()  ← blocking file I/O
+
+→ ওই worker-এর সব pending coroutine আটকে যাবে
+→ Solution: run_in_executor দিয়ে thread pool-এ offload করো
+           অথবা async library ব্যবহার করো (httpx, aiofiles, asyncpg)
+```
 
 ---
 
-# ⚔️ Mini Challenge
+## 3.9 Decision Guide — কোনটা কখন?
 
-ধরো তোমার FastAPI app-এ প্রতিটা request দুটো কাজ করে:
-- একটা DB query: 1 সেকেন্ড await
-- একটা ছোট calculation: 0.1 সেকেন্ড CPU time
+```
+আমার app কেমন?
+│
+├── App sync দিয়ে লেখা (blocking code, পুরনো library)
+│   │
+│   ├── Load বেশি না, simplicity চাই
+│   │   └── sync worker + workers বাড়াও
+│   │
+│   ├── I/O-heavy (DB/API call বেশি), async করা কঠিন
+│   │   └── gthread worker (--threads N)
+│   │       (I/O-তে GIL release হয়, threads concurrent হয়)
+│   │
+│   └── Legacy app, I/O-heavy, rewrite করা সম্ভব না
+│       └── gevent worker
+│           (monkey patching দিয়ে auto non-blocking)
+│
+└── App async দিয়ে লেখা (FastAPI, Starlette, async/await)
+    │
+    ├── I/O-heavy (DB/API call, WebSocket, high concurrency)
+    │   └── UvicornWorker ✅ (best choice)
+    │       + workers = CPU core count (parallelism-ও পাবে)
+    │
+    └── CPU-heavy কাজও আছে
+        └── UvicornWorker + run_in_executor
+            (CPU কাজ process pool-এ offload করো)
+```
 
-Setup: Gunicorn, 1 worker, 5টা request একসাথে।
+---
 
-**Case A — Sync worker:**
-মোট সময় কত? CPU কতটুকু busy থাকবে?
+## 3.10 Final Mental Model
 
-**Case B — Gthread worker (threads=5):**
-মোট সময় কত? Sync-এর চেয়ে কীভাবে আলাদা?
+```
+Gunicorn = Manager      → কে কী করবে ঠিক করে, workers বাঁচিয়ে রাখে
+Worker   = Engine       → কাজটা আসলে করে
 
-**Case C — UvicornWorker, async code:**
-মোট সময় কত? CPU utilization কেমন হবে?
+Engine type বদলালে behavior বদলায়:
 
-**Case D — UvicornWorker, কিন্তু DB driver টা accidentally sync (blocking):**
-এখন কী হবে? Case C-র সাথে তুলনা করো।
+sync           → sequential, 1 req at a time, simple
+gthread        → thread pool, I/O-bound-এ concurrent, GIL-bounded
+gevent         → greenlet event loop, legacy app-এর জন্য, monkey patching
+UvicornWorker  → asyncio event loop, modern async app, highest concurrency
+```
 
-Case D টা সবচেয়ে গুরুত্বপূর্ণ — এটাই real-world-এ সবচেয়ে বেশি হয়।
+**Gunicorn নিজে কোনো performance magic করে না** — সে শুধু সঠিক engine-কে সঠিকভাবে চালু রাখে। Performance আসে সঠিক worker type বেছে নেওয়া থেকে।
+
+---
+
+# ⚔️ Module 3 — Mini Challenge
+
+## 🧩 Scenario
+
+একটা FastAPI app, Gunicorn দিয়ে চালানো হচ্ছে। তিনটা আলাদা configuration-এ একই workload দেওয়া হলো।
+
+```
+App:      FastAPI
+Gunicorn: 1 worker
+Workload: 5 request একসাথে, প্রতিটা request = 2 seconds
+```
+
+---
+
+### Case A — Sync Worker
+
+```
+worker:   sync (default)
+request:  blocking (time.sleep(2))
+count:    5
+```
+
+### Case B — gthread Worker
+
+```
+worker:   gthread
+threads:  5
+request:  blocking (time.sleep(2))
+count:    5
+```
+
+### Case C — UvicornWorker
+
+```
+worker:   uvicorn.workers.UvicornWorker
+request:  non-blocking (await asyncio.sleep(2))
+count:    5
+```
+
+---
+
+## ❓ Questions
+
+**1.** Case A-তে total time কত?
+
+**2.** Case B-তে total time কত? Case A-র চেয়ে কেন আলাদা (বা একই)?
+
+**3.** Case C-তে total time কত? Case B-র চেয়ে কেন আলাদা (বা একই)?
+
+**4.** কোন case-এ CPU utilization সবচেয়ে কম, কিন্তু throughput সবচেয়ে বেশি? কেন?
+
+---
+
+> Hint: তিনটা case-এ concurrency-র mechanism আলাদা। শুধু সময় না, **কীভাবে** সময়টা কাটছে সেটাও ভাবো।
+
+---
+
+👉 তোমার reasoning লেখো — আমি razor দিয়ে কাটবো 🔍
