@@ -18,3 +18,6 @@
     - [Chapter 5: Process API](os/chapter_5.md)
  * [tiny-shell](tiny-shell/start.md)
     - [milestone 1](tiny-shell/milestone1.md)
+    - [milestone 2](tiny-shell/milestone2.md)
+    - [milestone 3](tiny-shell/milestone3.md)
+    - [milestone 4](tiny-shell/milestone4.md)
