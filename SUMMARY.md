@@ -16,3 +16,5 @@
 * [Operating System](os/start.md)
     - [Chapter 4: The Abstraction: The Process](os/chapter_4.md)
     - [Chapter 5: Process API](os/chapter_5.md)
+ * [tiny-shell](tiny-shell/start.md)
+    - [milestone 1](tiny-shell/milestone1.md)
