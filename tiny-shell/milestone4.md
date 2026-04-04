@@ -1,63 +1,38 @@
-# Milestone 4: Pipes
+# 🐚 Milestone 4: Pipes
 
 ## আগে বুঝি — Pipe আসলে কী?
 
-তুমি এটা হয়তো অনেকবার লিখেছ:
+Part 1-এ FD inherit section-এ একটা ছবি দেখিয়েছিলাম:
 
-```bash
-ls -la | grep .go | wc -l
+```
+ls লেখে FD 1-এ             grep পড়ে FD 0 থেকে
+    │                           ▲
+    │                           │
+    └──────── pipe ─────────────┘
 ```
 
-কিন্তু এই `|` এর ভেতরে আসলে কী হচ্ছে? এটা কোনো magic না — এটা OS-এর একটা খুব সুন্দর feature।
+এখন সেটা বাস্তবে implement করব। কিন্তু তার আগে pipe-এর ভেতরটা আরেকটু গভীরে দেখি।
 
 ---
 
-## 🧠 Concept: File Descriptor আবার দেখি
+## 🧠 Concept: Pipe আসলে কোথায় থাকে?
 
-Milestone 1-এ বলেছিলাম প্রতিটা process তিনটা FD নিয়ে জন্মায়:
-
-```
-Process
-├── FD 0 ──► stdin  (পড়ে)
-├── FD 1 ──► stdout (লেখে)
-└── FD 2 ──► stderr (error লেখে)
-```
-
-FD আসলে শুধু একটা **নম্বর**। Kernel একটা table রাখে — এই নম্বর দিয়ে আসলে কোথায় যাচ্ছে সেটা বলে দেয়:
-
-```
-Kernel-এর FD Table (process 1234-এর জন্য):
-┌─────┬──────────────────────────────────┐
-│ FD  │ আসলে কোথায় point করছে           │
-├─────┼──────────────────────────────────┤
-│  0  │ /dev/pts/0 (terminal keyboard)   │
-│  1  │ /dev/pts/0 (terminal screen)     │
-│  2  │ /dev/pts/0 (terminal screen)     │
-│  3  │ /home/shomi/file.txt (খোলা file) │
-└─────┴──────────────────────────────────┘
-```
-
-Key insight: **FD একটা নম্বর মাত্র। এই নম্বর যা point করে সেটা বদলে দেওয়া যায়।**
-
-এটাই Pipe-এর পুরো রহস্য।
-
----
-
-## 🧠 Concept: Pipe আসলে কী?
-
-Pipe হলো Kernel-এর মেমরিতে একটা **buffer** — একটা ছোট্ট in-memory queue।
+Pipe হলো Kernel-এর memory-তে একটা **buffer** — একটা ছোট্ট in-memory queue। Disk-এ যায় না, network-এ যায় না — শুধু RAM-এ থাকে।
 
 ```
 Kernel Memory-তে Pipe Buffer:
-┌─────────────────────────────────────┐
-│  PIPE BUFFER (64KB পর্যন্ত)         	  │
-│                                     │
-│  ← read end        write end →      │
-│                                     │
-│  [h][e][l][l][o][ ][w][o][r][l][d]  │
-│   ↑                              ↑  │
-│ পড়া হবে এখান থেকে    লেখা হয় এখানে  │  |
-└─────────────────────────────────────┘
+┌─────────────────────────────────────────────┐
+│           PIPE BUFFER (max 64KB)            │
+│                                             │
+│  write end →  [h][e][l][l][o][.][g][o]     │
+│                                         │   │
+│                         read end ←──────┘   │
+│                                             │
+│  • ls লেখে write end-এ                     │
+│  • grep পড়ে read end থেকে                  │
+│  • buffer ভরে গেলে ls WAITING-এ যায়        │
+│  • buffer খালি হলে grep WAITING-এ যায়      │
+└─────────────────────────────────────────────┘
 ```
 
 Pipe তৈরি হলে দুটো FD পাওয়া যায়:
@@ -66,81 +41,76 @@ Pipe তৈরি হলে দুটো FD পাওয়া যায়:
 
 ---
 
-## 🧠 Concept: Pipe দিয়ে দুটো Process কীভাবে কথা বলে?
+## 🧠 Concept: FD বদলানো — fork() এর আগেই
 
-`ls | grep .go` — এটা করতে হলে:
+Part 1-এ বলেছিলাম: **fork()-এর আগে FD বদলে দাও, exec()-এর পরেও সেই FD থাকবে।**
+
+এটাই pipe-এর পুরো কৌশল। ধাপে ধাপে দেখি:
 
 ```
-লক্ষ্য:
-ls-এর stdout ──────────────► grep-এর stdin
-
-বাস্তবে যা হয়:
+লক্ষ্য: ls | grep .go
 
 Step 1: pipe() syscall করো
-        দুটো FD তৈরি হলো:
-        pipeRead  (FD 3)
-        pipeWrite (FD 4)
+        ┌─────────────────────────────────┐
+        │ Kernel একটা buffer বানালো      │
+        │ FD 3 = read end                 │
+        │ FD 4 = write end                │
+        └─────────────────────────────────┘
 
-Step 2: ls-এর জন্য child 1 তৈরি করো (fork)
-        child 1-এর stdout (FD 1) বদলে দাও
-        FD 1 → pipeWrite (FD 4)
-        এখন ls যা লিখবে সব pipe-এ যাবে
+Step 2: ls-এর জন্য fork() করো
+        child পেলো:
+        FD 0 → keyboard
+        FD 1 → screen    ← এটা বদলাতে হবে
+        FD 3 → pipe read
+        FD 4 → pipe write
 
-Step 3: grep-এর জন্য child 2 তৈরি করো (fork)
-        child 2-এর stdin (FD 0) বদলে দাও
-        FD 0 → pipeRead (FD 3)
-        এখন grep যা পড়বে সব pipe থেকে আসবে
+        FD 1 বদলে দাও → pipe write (FD 4)
+        FD 3, FD 4 বন্ধ করো (আর দরকার নেই)
 
-Step 4: দুই child-কে চালাও
-        ls লেখে → pipe buffer-এ জমা হয়
-        grep পড়ে ← pipe buffer থেকে নেয়
+        exec("ls") করো
+        এখন ls FD 1-এ লিখলে pipe-এ যাবে ✓
+
+Step 3: grep-এর জন্য fork() করো
+        child পেলো:
+        FD 0 → keyboard  ← এটা বদলাতে হবে
+        FD 1 → screen
+        FD 3 → pipe read
+        FD 4 → pipe write
+
+        FD 0 বদলে দাও → pipe read (FD 3)
+        FD 3, FD 4 বন্ধ করো (আর দরকার নেই)
+
+        exec("grep") করো
+        এখন grep FD 0 থেকে পড়লে pipe থেকে আসবে ✓
 ```
 
-ASCII-তে পুরো ছবি:
+পুরো ছবি:
 
 ```
-                    KERNEL
-┌───────────────────────────────────────────────────┐
-│                                                   │
-│  PIPE BUFFER                                      │
-│  ┌─────────────────────────────┐                  │
-│  │  [data flowing through]     │                  │
-│  └──────────┬──────────────────┘                  │
-│    read(FD3)│           │write(FD4)               │
-└─────────────┼───────────┼─────────────────────────┘
-              │           │
-     ┌────────┘           └────────┐
-     │                             │
-     ▼                             ▼
-┌─────────────┐             ┌─────────────┐
-│  grep       │             │  ls         │
-│  (child 2)  │             │  (child 1)  │
-│             │             │             │
-│  FD 0 ◄───  │ ←━━━━━━━━━ 	│ ───► FD 1   │
-│  (stdin)    │             │   (stdout)  │
-│  pipe থেকে  │           	│  pipe-এ     │
-│  পড়ছে       │             │  লিখছে      │
-└─────────────┘             └─────────────┘
-```
+                        KERNEL
+┌──────────────────────────────────────────────────────┐
+│                  PIPE BUFFER                         │
+│  ┌───────────────────────────────────┐               │
+│  │  [main.go\nexecutor.go\n...]      │               │
+│  └────────────────┬──────────────────┘               │
+│      read(FD 3)   │         │  write(FD 4)           │
+└───────────────────┼─────────┼────────────────────────┘
+                    │         │
+          ┌─────────┘         └──────────┐
+          │                              │
+          ▼                              ▼
+┌──────────────────┐          ┌──────────────────┐
+│  grep (child 2)  │          │  ls   (child 1)  │
+│                  │          │                  │
+│  FD 0 → pipe read│          │  FD 1 → pipe write
+│  FD 1 → screen   │          │  FD 0 → keyboard │
+│                  │          │                  │
+│  pipe থেকে পড়ে  │◄─────────│  pipe-এ লেখে    │
+│  screen-এ দেখায় │          │                  │
+└──────────────────┘          └──────────────────┘
 
----
-
-## 🧠 Concept: dup2 — FD বদলে দেওয়ার syscall
-
-FD বদলানো হয় `dup2()` syscall দিয়ে।
-
-`dup2(oldFD, newFD)` মানে: "newFD কে oldFD-এর মতো বানিয়ে দাও"
-
-```
-dup2(pipeWrite, 1) মানে:
-
-আগে:                        পরে:
-FD 1 → terminal screen      FD 1 → pipe write end
-FD 4 → pipe write end       FD 4 → pipe write end
-
-এখন ls FD 1-এ লিখলে
-terminal-এ না গিয়ে
-pipe-এ যাবে!
+ls জানে না সে pipe-এ লিখছে — ভাবছে FD 1 = screen
+grep জানে না সে pipe থেকে পড়ছে — ভাবছে FD 0 = keyboard
 ```
 
 ---
@@ -150,19 +120,63 @@ pipe-এ যাবে!
 `ls | grep .go | wc -l` — তিনটা command, দুটো pipe:
 
 ```
-ls ──[pipe1]──► grep ──[pipe2]──► wc
+N টা command → N-1 টা pipe লাগে
+
+ls ──[pipe0]──► grep ──[pipe1]──► wc
 │                │                 │
-stdout→pipe1    stdin←pipe1       stdin←pipe2
-                stdout→pipe2
+FD1→pipe0.w     FD0←pipe0.r       FD0←pipe1.r
+                FD1→pipe1.w       FD1→screen
+
+pipe0: ls এবং grep-এর মাঝে
+pipe1: grep এবং wc-এর মাঝে
 ```
 
-প্রতিটা command জোড়ার মাঝে একটা করে pipe লাগে। N টা command হলে N-1 টা pipe।
+---
+
+## 🧠 Concept: Deadlock — সবচেয়ে সাধারণ Pipe Bug
+
+এটা এতটাই গুরুত্বপূর্ণ যে আলাদা করে বোঝাচ্ছি।
+
+**Parent-এ write end বন্ধ না করলে কী হয়:**
+
+```
+পরিস্থিতি:
+ls শেষ হয়ে গেছে → child 1 exit করলো
+grep এখনো পড়ছে → pipe থেকে আরো data আসার অপেক্ষায়
+
+grep কখন থামবে?
+→ যখন pipe-এর write end সম্পূর্ণ বন্ধ হবে (EOF পাবে)
+
+pipe-এর write end কার কাছে আছে?
+→ child 1 (ls) এর কাছে ← exit করেছে, বন্ধ হয়ে গেছে
+→ parent (shell) এর কাছে ← এখনো খোলা!
+
+grep ভাবছে: "parent হয়তো আরো কিছু লিখবে"
+grep অপেক্ষা করছে... করছে... করছে...
+
+shell ভাবছে: "grep শেষ হলে এগোব"
+shell অপেক্ষা করছে... করছে... করছে...
+
+══► DEADLOCK — কেউ এগোতে পারছে না
+
+┌─────────────────────────────────────────┐
+│  shell → grep-এর জন্য অপেক্ষা          │
+│  grep  → shell-এর write end বন্ধের     │
+│          জন্য অপেক্ষা                  │
+│                                         │
+│  চিরকাল আটকে থাকবে!                   │
+└─────────────────────────────────────────┘
+
+Solution: fork() করার পরেই parent-এ
+          write end বন্ধ করে দাও।
+          তাহলে grep EOF পাবে এবং থামবে।
+```
 
 ---
 
 ## 🏗️ Code
 
-### Step 1: `internal/executor/pipe.go` — নতুন file
+### নতুন file: `internal/executor/pipe.go`
 
 ```go
 // internal/executor/pipe.go
@@ -176,32 +190,30 @@ import (
 	"tiny-shell/internal/parser"
 )
 
-// executePipeline — pipe দিয়ে জোড়া commands চালাও
 func executePipeline(pipeline *parser.Pipeline) error {
 	cmds := pipeline.Commands
 	n := len(cmds)
 
-	// প্রতিটা command-এর জন্য একটা *exec.Cmd তৈরি করো
+	// ── প্রতিটা command-এর জন্য exec.Cmd তৈরি করো ──────
 	processes := make([]*exec.Cmd, n)
 	for i, cmd := range cmds {
 		processes[i] = exec.Command(cmd.Name, cmd.Args...)
 	}
 
-	// ── Pipe তৈরি করো ──────────────────────────────────────
+	// ── N-1 টা pipe তৈরি করো ────────────────────────────
 	//
-	// N টা command-এ N-1 টা pipe লাগে:
 	// cmd0 | cmd1 | cmd2
 	//      pipe0       pipe1
 	//
-	// pipes[i] = cmd[i] এবং cmd[i+1] এর মাঝের pipe
+	// pipes[i] = cmd[i] এবং cmd[i+1]-এর মাঝের pipe
 	//
-	// os.Pipe() করলে দুটো *os.File পাই:
-	//   r = read end  (এখান থেকে পড়া যাবে)
-	//   w = write end (এখানে লেখা যাবে)
+	// os.Pipe() দুটো *os.File দেয়:
+	//   r = read end
+	//   w = write end
 
 	type pipePair struct {
-		r *os.File // read end
-		w *os.File // write end
+		r *os.File
+		w *os.File
 	}
 
 	pipes := make([]pipePair, n-1)
@@ -213,52 +225,55 @@ func executePipeline(pipeline *parser.Pipeline) error {
 		pipes[i] = pipePair{r, w}
 	}
 
-	// ── প্রতিটা command-এর stdin/stdout connect করো ────────
+	// ── প্রতিটা command-এর stdin/stdout connect করো ──────
 	//
-	// cmd[0]:  stdin = terminal,     stdout = pipe[0].w
-	// cmd[1]:  stdin = pipe[0].r,    stdout = pipe[1].w
-	// cmd[2]:  stdin = pipe[1].r,    stdout = terminal
+	// index    stdin              stdout
+	// ──────   ──────────────     ──────────────────
+	// 0        terminal           pipes[0].w
+	// 1        pipes[0].r         pipes[1].w
+	// 2        pipes[1].r         pipes[2].w
+	// n-1      pipes[n-2].r       terminal
 	//
-	// সহজ মনে রাখার উপায়:
-	//   প্রথম command-এর আগে কোনো pipe নেই → stdin = terminal
-	//   শেষ command-এর পরে কোনো pipe নেই  → stdout = terminal
-	//   মাঝের সবার stdin ও stdout pipe-এ
+	// সহজ নিয়ম:
+	//   প্রথম command → stdin = terminal
+	//   শেষ command  → stdout = terminal
+	//   বাকি সব      → stdin/stdout = pipe
 
 	for i, proc := range processes {
 
-		// ── stdin সেট করো ──
+		// stdin
 		if i == 0 {
-			// প্রথম command: keyboard থেকে পড়ো
-			proc.Stdin = os.Stdin
+			proc.Stdin = os.Stdin       // প্রথম: keyboard
 		} else {
-			// বাকিরা: আগের command-এর pipe থেকে পড়ো
-			proc.Stdin = pipes[i-1].r
+			proc.Stdin = pipes[i-1].r  // বাকি: আগের pipe থেকে
 		}
 
-		// ── stdout সেট করো ──
+		// stdout
 		if i == n-1 {
-			// শেষ command: terminal-এ লেখো
-			proc.Stdout = os.Stdout
+			proc.Stdout = os.Stdout    // শেষ: screen
 		} else {
-			// বাকিরা: পরের command-এর pipe-এ লেখো
-			proc.Stdout = pipes[i].w
+			proc.Stdout = pipes[i].w   // বাকি: পরের pipe-এ
 		}
 
-		// stderr সবার জন্য terminal-এ যাক
+		// stderr সবার জন্য terminal
 		proc.Stderr = os.Stderr
 	}
 
-	// ── সব command একসাথে Start করো ───────────────────────
+	// ── সব command Start করো ─────────────────────────────
 	//
-	// Run() নয়! Run() = Start() + Wait()
+	// Run() নয় — Run() = Start() + Wait()
 	// আমরা সব Start() করব, তারপর সব Wait() করব
-	// কারণ: সব process একসাথে চলতে হবে
-	//        একটা শেষ হওয়ার জন্য অপেক্ষা করলে
-	//        pipe block হয়ে যাবে (deadlock!)
+	//
+	// কেন?
+	// একটা Start() করে Wait() করলে সে block হবে
+	// কারণ pipe full হলে ls লিখতে পারবে না
+	// কিন্তু grep পড়ছে না (এখনো Start হয়নি)
+	// → deadlock!
+	//
+	// তাই সব আগে Start(), তারপর সব Wait()
 
 	for i, proc := range processes {
 		if err := proc.Start(); err != nil {
-			// এই command start করতে পারিনি
 			if err == exec.ErrNotFound {
 				return fmt.Errorf("%s: command not found",
 					cmds[i].Name)
@@ -267,37 +282,44 @@ func executePipeline(pipeline *parser.Pipeline) error {
 		}
 	}
 
-	// ── Write end গুলো বন্ধ করো (parent-এ) ────────────────
+	// ── Parent-এ write end বন্ধ করো ──────────────────────
 	//
-	// এটা খুব গুরুত্বপূর্ণ! কেন?
+	// এটাই deadlock এড়ানোর key!
 	//
-	// grep পড়তে থাকে যতক্ষণ pipe-এর write end খোলা আছে।
-	// ls শেষ হয়ে গেলে child-এর write end বন্ধ হয়।
-	// কিন্তু parent (shell)-এর কাছেও write end-এর copy আছে!
-	// তাই grep কখনো EOF পাবে না — চিরকাল অপেক্ষা করবে।
+	// fork() হওয়ার পরে pipe-এর write end দুই জায়গায়:
+	//   child (ls)    → Start() হলে সে exit করলে বন্ধ হবে
+	//   parent (shell)→ এখনো খোলা! ← এটা এখনই বন্ধ করো
 	//
-	// তাই parent-এ write end বন্ধ করে দিতে হবে।
-	//
-	// ┌─────────────────────────────────────────────────────┐
-	// │  pipe.w এর copies:                                  │
-	// │  - child 1 (ls) এর কাছে ← Start() এর পরে বন্ধ হবে │
-	// │  - parent (shell) এর কাছে ← আমরা এখনই বন্ধ করি    │
-	// └─────────────────────────────────────────────────────┘
+	// parent-এর write end বন্ধ না করলে:
+	//   ls শেষ হলেও grep EOF পাবে না
+	//   grep চিরকাল অপেক্ষা করবে
+	//   shell grep-এর জন্য অপেক্ষা করবে
+	//   → deadlock!
 
 	for _, p := range pipes {
-		p.w.Close() // parent-এর write end বন্ধ করো
+		// write end বন্ধ করো
+		// read end এখনো খোলা — child (grep) পড়ছে
+		p.w.Close()
 	}
 
-	// ── সব command শেষ হওয়ার জন্য অপেক্ষা করো ─────────────
+	// ── সব command শেষ হওয়ার জন্য Wait করো ──────────────
+	//
+	// Wait() করার সময় যা হয়:
+	//   ls শেষ হলো → pipe-এর write end (child-এর copy) বন্ধ
+	//   parent-এর copy আগেই বন্ধ করেছি
+	//   → pipe-এর write end সম্পূর্ণ বন্ধ
+	//   → grep EOF পেলো → grep শেষ হলো
+	//   → Wait(grep) return করলো
+
 	var lastErr error
 	for _, proc := range processes {
 		if err := proc.Wait(); err != nil {
-			// শেষ command-এর error টা রাখো
 			lastErr = err
 		}
 	}
 
-	// ── Read end গুলোও বন্ধ করো ────────────────────────────
+	// ── Read end গুলোও বন্ধ করো ──────────────────────────
+	// সব শেষ, এখন read end-ও বন্ধ করা যায়
 	for _, p := range pipes {
 		p.r.Close()
 	}
@@ -308,7 +330,7 @@ func executePipeline(pipeline *parser.Pipeline) error {
 
 ---
 
-### Step 2: `executor.go` আপডেট
+### `executor.go` আপডেট
 
 ```go
 // internal/executor/executor.go
@@ -334,14 +356,12 @@ func Execute(line string) error {
 		return nil
 	}
 
-	// Single command?
+	// Single command — pipe নেই
 	if len(pipeline.Commands) == 1 {
 		return executeSingle(pipeline.Commands[0])
 	}
 
 	// Multiple commands — pipe আছে
-	// Built-in commands pipe-এ কাজ করে না এখনো
-	// (Milestone 8-এ handle করব)
 	return executePipeline(pipeline)
 }
 
@@ -350,6 +370,7 @@ func executeSingle(cmd *parser.Command) error {
 		return nil
 	}
 
+	// Built-in চেক করো আগে
 	allArgs := append([]string{cmd.Name}, cmd.Args...)
 	handled, err := builtins.Execute(allArgs)
 	if handled {
@@ -361,7 +382,7 @@ func executeSingle(cmd *parser.Command) error {
 
 func runCommand(cmd *parser.Command) error {
 	c := exec.Command(cmd.Name, cmd.Args...)
-	c.Stdin = os.Stdin
+	c.Stdin  = os.Stdin
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 
@@ -382,7 +403,7 @@ func runCommand(cmd *parser.Command) error {
 
 ---
 
-## চালাও এবং দেখো
+## চালাও
 
 ```bash
 go run cmd/shell/main.go
@@ -390,7 +411,8 @@ go run cmd/shell/main.go
 
 ```
 tiny-shell ~> ls | grep .go
-main.go
+executor.go
+pipe.go
 
 tiny-shell ~> echo "hello world" | grep hello
 hello world
@@ -400,9 +422,6 @@ tiny-shell ~> cat /etc/passwd | grep root | wc -l
 
 tiny-shell ~> ls -la | sort | head -5
 (sorted output)
-
-tiny-shell ~> echo "one\ntwo\nthree" | wc -l
-3
 ```
 
 ---
@@ -410,61 +429,54 @@ tiny-shell ~> echo "one\ntwo\nthree" | wc -l
 ## 🔬 "What just happened?" — `ls | grep .go` করলে OS-এ কী হলো
 
 ```
-tiny-shell ~> ls | grep .go
+"ls | grep .go" টাইপ করলে:
         │
         ▼
-Parse করো:
-Pipeline:
+Parse: Pipeline{
   Command[0]: {Name:"ls",   Args:[]}
   Command[1]: {Name:"grep", Args:[".go"]}
+}
         │
         ▼
 executePipeline() call হলো
         │
         │ os.Pipe() syscall
-        │ Kernel একটা pipe buffer তৈরি করলো
+        │ Kernel buffer বানালো:
+        │ pipes[0] = {r:FD3, w:FD4}
         │
         ▼
-pipes[0] = {r: FD3, w: FD4}
+processes[0] (ls) setup:
+  Stdin  = terminal
+  Stdout = pipes[0].w (FD4) ← pipe-এ লিখবে
+  Stderr = terminal
 
-        │
-        │ processes[0] (ls) setup:
-        │   Stdin  = terminal (FD0)
-        │   Stdout = pipes[0].w (FD4) ← pipe-এ লিখবে
-        │
-        │ processes[1] (grep) setup:
-        │   Stdin  = pipes[0].r (FD3) ← pipe থেকে পড়বে
-        │   Stdout = terminal (FD1)
+processes[1] (grep) setup:
+  Stdin  = pipes[0].r (FD3) ← pipe থেকে পড়বে
+  Stdout = terminal
+  Stderr = terminal
         │
         ▼
 processes[0].Start() → fork() + exec("ls")
 processes[1].Start() → fork() + exec("grep", ".go")
 
-এখন দুটো process একসাথে চলছে:
-
-┌──────────────────────────────────────────────┐
-│                                              │
-│  ls (child 1)          grep (child 2)        │
-│  ─────────────         ───────────────       │
-│  main.go       ──►    pipe buffer    ──►     │
-│  executor.go   ──►    [main.go\n     ──►     │
-│  parser.go     ──►     executor.go\n ──►     │
-│                        parser.go\n]          │
-│                                     ──►  screen:
-│                                         main.go
-│  exit(0)               grep ".go" filter    │
-│                        exit(0)              │
-└──────────────────────────────────────────────┘
+দুটো process এখন একসাথে চলছে:
         │
         ▼
-pipes[0].w.Close() → parent-এর write end বন্ধ
+pipes[0].w.Close() ← parent-এর write end বন্ধ!
         │
         ▼
-Wait(ls)   → শেষ হয়েছে ✓
-Wait(grep) → শেষ হয়েছে ✓
+ls চলছে:                    grep চলছে:
+main.go → pipe buffer       pipe buffer → "main.go" → .go আছে? হ্যাঁ → screen
+pipe.go → pipe buffer       pipe buffer → "pipe.go" → .go আছে? হ্যাঁ → screen
         │
-        ▼
-pipes[0].r.Close()
+ls exit(0)
+pipe write end সম্পূর্ণ বন্ধ
+(child copy + parent copy দুটোই বন্ধ)
+        │
+grep EOF পেলো → grep exit(0)
+        │
+Wait(ls)   ✓
+Wait(grep) ✓
         │
         ▼
 tiny-shell ~> (prompt ফিরে এলো)
@@ -472,48 +484,27 @@ tiny-shell ~> (prompt ফিরে এলো)
 
 ---
 
-## 🧠 Deadlock — সবচেয়ে সাধারণ Pipe Bug
-
-এটা এতটাই গুরুত্বপূর্ণ যে আলাদা করে বোঝাচ্ছি।
-
-Parent-এ write end বন্ধ না করলে কী হয়:
-
-```
-ls শেষ হয়ে গেছে (child 1 exit)
-grep এখনো পড়ছে (pipe থেকে)
-grep ভাবছে: "আরো data আসবে, অপেক্ষা করি"
-
-কেন ভাবছে?
-কারণ pipe-এর write end এখনো খোলা আছে!
-parent (shell) এর কাছে write end-এর copy আছে।
-
-grep → pipe → "কেউ কি আরো লিখবে?" → হ্যাঁ! (parent এর কাছে আছে)
-grep → চিরকাল অপেক্ষা করতে থাকে
-shell → grep শেষ হওয়ার জন্য অপেক্ষা করছে
-shell → চিরকাল অপেক্ষা করতে থাকে
-
-══► DEADLOCK! কেউ এগোতে পারছে না।
-
-Solution:
-parent-এ write end বন্ধ করো:
-pipes[i].w.Close()
-এখন grep EOF পাবে এবং শেষ হবে।
-```
-
----
-
 ## 🧪 Experiment করো
 
-**১. Long pipeline চালাও:**
+**১. Deadlock নিজে দেখো:**
+
+`pipe.go`-তে এই line comment করো:
+```go
+// p.w.Close()  ← এটা comment করো
+```
+
+এখন `ls | grep .go` চালাও — shell আটকে যাবে। Ctrl+C দিয়ে বের হও। তারপর comment সরিয়ে দাও।
+
+**২. Long pipeline:**
 ```bash
 tiny-shell ~> cat /etc/passwd | cut -d: -f1 | sort | uniq | wc -l
 ```
 
-**২. Pipe কতটুকু buffer রাখে দেখো:**
+**৩. Pipe buffer size দেখো:**
+
+আলাদা একটা Go file-এ (tiny-shell-এর বাইরে) এটা চালাও:
 
 ```go
-// এটা একটা আলাদা test file-এ চালাও
-// tiny-shell-এর বাইরে
 package main
 
 import (
@@ -522,52 +513,34 @@ import (
 )
 
 func main() {
-    r, w, _ := os.Pipe()
-    
-    // Pipe-এর capacity দেখো
+    _, w, _ := os.Pipe()
     written := 0
     buf := make([]byte, 4096)
-    for i := range buf {
-        buf[i] = 'x'
-    }
-    
-    // Non-blocking লেখার চেষ্টা
-    // (এটা block করবে যখন pipe ভরে যাবে)
+    for i := range buf { buf[i] = 'x' }
+
     for {
         n, err := w.Write(buf)
         written += n
         if err != nil {
-            fmt.Printf("Pipe full at: %d bytes\n", written)
+            fmt.Printf("pipe full: %d bytes\n", written)
             break
         }
     }
-    r.Close()
-    w.Close()
 }
 ```
 
-Linux-এ pipe buffer সাধারণত **65536 bytes (64KB)**।
-
-**৩. Debug mode দিয়ে pipeline দেখো:**
-```
-tiny-shell ~> debug ls -la | grep .go | wc -l
-Pipeline (bg=false):
-  Command[0]: Name:"ls"   Args:["-la"]
-  Command[1]: Name:"grep" Args:[".go"]
-  Command[2]: Name:"wc"   Args:["-l"]
-```
+Linux-এ দেখবে **65536 bytes (64KB)** — এটাই pipe buffer-এর default size।
 
 ---
 
 ## 📋 Milestone 4 Checklist
 
-- ✅ Pipe কী এবং কীভাবে কাজ করে বুঝলাম
-- ✅ FD redirect করা বুঝলাম
-- ✅ fork + exec + pipe connect করা বুঝলাম
+- ✅ Pipe কী এবং kernel-এ কোথায় থাকে বুঝলাম
+- ✅ FD বদলে দুই process connect করা বুঝলাম
 - ✅ Deadlock কেন হয় এবং কীভাবে এড়ানো যায় বুঝলাম
+- ✅ Start() vs Run() পার্থক্য বুঝলাম
 - ✅ Multiple pipe (3+ command) কাজ করছে
-- ✅ `ls | grep | wc` style pipeline চলছে
 
 ---
 
-Milestone 4 চললে বলো — **Milestone 5: I/O Redirection** শুরু করব। সেখানে `>`, `>>`, `<` implement করব। `dup2` syscall সরাসরি ব্যবহার করব — FD নিজে হাতে বদলে দেব। 🚀
+Milestone 4 চললে বলো — **Milestone 5: I/O Redirection** শুরু করব। সেখানে `>`, `>>`, `<` implement করব — FD নিজে হাতে বদলাব, `dup2` syscall সরাসরি ব্যবহার করব। 🚀
