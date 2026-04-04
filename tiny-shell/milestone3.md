@@ -1,4 +1,4 @@
-# 🐚 Milestone 3: Command Parsing
+# Milestone 3: Command Parsing
 
 ## আগে বুঝি — Parsing কেন দরকার?
 

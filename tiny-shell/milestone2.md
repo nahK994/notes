@@ -1,4 +1,4 @@
-# 🐚 Milestone 2: Built-in Commands
+# Milestone 2: Built-in Commands
 
 ## আগে একটা প্রশ্ন — `cd` কেন আলাদা?
 

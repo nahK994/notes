@@ -1,4 +1,4 @@
-# 🐚 Milestone 4: Pipes
+# Milestone 4: Pipes
 
 ## আগে বুঝি — Pipe আসলে কী?
 
