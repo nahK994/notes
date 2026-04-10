@@ -273,10 +273,12 @@ t=2s: "B" print হলো
 
 ### Coroutine-এর জীবনচক্র
 
-একটা coroutine তৈরি হয়ে শেষ হওয়া পর্যন্ত কয়েকটা stage পার করে:
+একটা coroutine তৈরি হয়ে শেষ হওয়া পর্যন্ত কয়েকটা stage পার করে। একটু সতর্কভাবে দেখো:
 
 ```
-Created → Scheduled → Running → Paused → Resumed → Done
+Created → Scheduled → Running → Paused → Running → Done
+                                   ↑          ↓
+                               (await)    (resume হলে আবার Running)
 ```
 
 **Created:** `coro = task()` — object তৈরি হলো, এখনো চলেনি।
@@ -285,11 +287,120 @@ Created → Scheduled → Running → Paused → Resumed → Done
 
 **Running:** Event loop তুলে নিলো, চালাচ্ছে।
 
-**Paused:** `await` পেলো → নিজে থেকে pause, control event loop-এ।
+**Paused:** `await` পেলো → নিজে থেকে pause, control event loop-এ। (I/O-এর জন্য অপেক্ষা করছে)
 
-**Resumed:** যার জন্য অপেক্ষা করছিলো সেটা শেষ → আবার ready queue-তে → আবার চলবে।
+**Running (আবার):** যার জন্য অপেক্ষা করছিলো সেটা শেষ → event loop আবার তুলে নিলো → continue।
 
 **Done:** শেষ — result বা exception নিয়ে বের হলো।
+
+> **কেন "Resumed" না, "Running" বলছি?**
+>
+> "Resumed" মানে হলো paused থেকে running-এ গেলো — এটা একটা transition, আলাদা state না। একটা coroutine pause হয় `await`-এ, তারপর যখন I/O শেষ হয়, event loop সেটাকে আবার ready queue-তে রাখে এবং পরে চালায়। এই "চালানো" মানেই সে আবার **Running** state-এ — আগের মতোই। তারপর যদি আরেকটা `await` পায়, আবার Paused। এই cycle চলতে থাকে।
+>
+> ```python
+> async def example():
+>     print("A")          # Running
+>     await sleep(1)      # Paused (I/O wait)
+>     print("B")          # Running আবার (resume হয়েছে, কিন্তু state = Running)
+>     await sleep(1)      # Paused আবার
+>     print("C")          # Running আবার
+>                         # Done
+> ```
+>
+> `await` যতবার আসবে, ততবার Paused → Running cycle হবে।
+
+---
+
+### OS-এর সাহায্য — epoll/kqueue
+
+#### epoll/kqueue কী?
+
+ধরো তুমি ১০,০০০ network connection একসাথে monitor করতে চাও। তুমি জানতে চাও — কোনটায় data এসেছে?
+
+**সহজ কিন্তু বাজে উপায়:** প্রতিটা connection একে একে check করো।
+
+```
+for conn in connections:      # ১০,০০০ বার ঘুরছো
+    if conn.has_data():
+        handle(conn)
+```
+
+১০,০০০ connection-এর মধ্যে মাত্র ২টায় data আছে — কিন্তু তুমি ১০,০০০ বার check করছো। এটাকে বলে **polling**, এবং এটা ভয়ঙ্কর wasteful।
+
+**OS-এর smart উপায় — epoll (Linux) / kqueue (macOS):**
+
+তুমি OS-কে বলো: "এই ১০,০০০ connection watch করো। যেটায় data আসবে, আমাকে জানাবে।"
+
+OS নিজে efficiently watch করে। Data আসলে শুধু ওই connection-এর কথা জানায়। তুমি বসে বসে সব check করছো না।
+
+```
+তুমি (event loop):        OS (epoll/kqueue):
+"এগুলো দেখো"  ────────→  [efficiently monitoring করছে]
+                          [data আসলে...]
+"কোনটায় data?" ←────────  "connection #4872 আর #9031"
+শুধু এই দুটো handle করো
+```
+
+epoll/kqueue হলো OS-এর একটা **event notification system**। এটা kernel-এর ভেতরে থাকে এবং হাজার হাজার file descriptor (connection, file, socket) efficiently monitor করতে পারে।
+
+#### Asyncio-এর সাথে সম্পর্ক
+
+Asyncio সরাসরি epoll/kqueue ব্যবহার করে। কোনো extra thread নেই।
+
+```
+asyncio event loop flow:
+
+1. তুমি লিখলে: await client.get("https://api.example.com")
+
+2. asyncio → OS-কে বলে:
+   "এই socket-এ data আসলে আমাকে জানাবে"
+   (epoll/kqueue-এ register করলো)
+
+3. এই coroutine pause হলো।
+   Event loop অন্য ready coroutine চালাচ্ছে।
+
+4. Network response এলো → OS kernel detect করলো
+
+5. OS → asyncio-কে notify করলো:
+   "ওই socket ready"
+
+6. asyncio → সেই coroutine-কে ready queue-তে দিলো
+
+7. সেই coroutine resume হলো, response পেলো
+```
+
+Diagram হিসেবে:
+
+```
+┌─────────────────────────────────────────────────┐
+│              Python Process                      │
+│                                                  │
+│  ┌──────────────────────────────────┐            │
+│  │         Event Loop               │            │
+│  │                                  │            │
+│  │  Ready Queue:                    │            │
+│  │  [coro_A] [coro_C]               │            │
+│  │                                  │            │
+│  │  Waiting (I/O):                  │            │
+│  │  [coro_B → socket_42]            │            │
+│  │  [coro_D → socket_87]            │            │
+│  └──────────┬───────────────────────┘            │
+│             │ epoll_wait() call                  │
+│             ↓                                    │
+└─────────────────────────────────────────────────┘
+              │
+              ↓
+┌─────────────────────────────────────────────────┐
+│              OS Kernel                           │
+│                                                  │
+│  epoll instance:                                 │
+│  watching [socket_42, socket_87, ...]            │
+│                                                  │
+│  "socket_42 ready!" → notify event loop         │
+└─────────────────────────────────────────────────┘
+```
+
+এটাই কারণ asyncio কোনো background thread ছাড়া হাজার হাজার connection handle করতে পারে — OS নিজেই efficient notification দিচ্ছে।
 
 ---
 
@@ -338,24 +449,6 @@ news    ────────────→ done   (একই সময়�
 await       → এখনই অপেক্ষা করো (sequential)
 create_task → schedule করো (concurrent)
 ```
-
----
-
-### OS-এর সাহায্য — epoll/kqueue
-
-একটা প্রশ্ন আসতে পারে — asyncio কি আসলে background-এ thread ব্যবহার করে?
-
-**না।** Asyncio সরাসরি OS-এর I/O mechanism ব্যবহার করে।
-
-```
-event loop → OS-কে বলে: "এই connection-এ data আসলে আমাকে জানিও"
-             (OS নিজেই track করে, কোনো thread লাগে না)
-event loop → এই ফাঁকে অন্য কাজ করছে
-OS → "ওই connection ready" → notify
-event loop → সেই coroutine-কে resume করে
-```
-
-Linux-এ এই mechanism-এর নাম **epoll**, macOS-এ **kqueue**। Python-এর asyncio এগুলো নিজে নিজে ব্যবহার করে — তোমাকে manually করতে হয় না।
 
 ---
 
@@ -408,7 +501,70 @@ process_image() → কোনো await নেই → কোনো pause নে�
 
 Async শুধু তখনই কাজে আসে যখন কাজের মধ্যে **অপেক্ষা** আছে — network, disk, database। Pure CPU কাজে async কোনো সাহায্য করে না।
 
-CPU-heavy কাজের সমাধান আসবে পরের অংশে (`run_in_executor` দিয়ে thread/process pool-এ পাঠানো)।
+#### সমাধান: `run_in_executor` দিয়ে thread/process pool-এ পাঠাও
+
+CPU-heavy কাজকে async code-এর ভেতর থেকে আলাদা thread বা process-এ পাঠিয়ে দেওয়া যায় — event loop block না করে।
+
+**Thread pool দিয়ে (I/O-bound blocking কাজ, যেমন পুরনো library যেটা async support করে না):**
+
+```python
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+executor = ThreadPoolExecutor()
+
+async def handler():
+    loop = asyncio.get_event_loop()
+
+    # process_image() blocking কিন্তু এটাকে thread-এ পাঠিয়ে দিলাম
+    result = await loop.run_in_executor(executor, process_image, image_data)
+    return result
+```
+
+```
+Event Loop (main thread):
+  handler coroutine চলছে
+  → run_in_executor call
+  → process_image() → thread pool-এর thread-এ গেলো
+  → coroutine pause (await)
+  → event loop অন্য coroutines চালাচ্ছে ✅
+
+Thread Pool:
+  Thread #1: process_image() চলছে (blocking, কিন্তু আলাদা thread-এ)
+  → শেষ হলে → event loop-কে notify
+  → coroutine resume
+```
+
+**Process pool দিয়ে (CPU-bound কাজ, যেমন image processing, ML inference):**
+
+```python
+import asyncio
+from concurrent.futures import ProcessPoolExecutor
+
+process_executor = ProcessPoolExecutor()
+
+async def handler():
+    loop = asyncio.get_event_loop()
+
+    # process_image() CPU-heavy → আলাদা process-এ পাঠাও
+    result = await loop.run_in_executor(process_executor, process_image, image_data)
+    return result
+```
+
+Thread pool vs Process pool:
+
+| | Thread Pool | Process Pool |
+|---|---|---|
+| কখন ব্যবহার করবে? | Blocking I/O (requests, পুরনো sync library) | CPU-heavy কাজ (image/video processing, ML) |
+| Memory share? | হ্যাঁ (same process) | না (আলাদা process) |
+| GIL এর সমস্যা? | আছে (CPU bound-এ কাজ করবে না) | নেই (আলাদা process) |
+| Overhead | কম | বেশি (process তৈরিতে সময় লাগে) |
+
+সহজ নিয়ম:
+```
+Blocking legacy library → ThreadPoolExecutor
+CPU-heavy কাজ          → ProcessPoolExecutor
+```
 
 ### ফাঁদ ৩: async ≠ parallel
 
@@ -422,7 +578,332 @@ Async-এ যেকোনো এক মুহূর্তে মাত্র এ
 
 ---
 
-## 🌐 Part 5: Real-world — কোথায় asyncio লাগে, কোথায় না
+## 🧵 Part 5: Python Threading — কখন, কেন, কীভাবে
+
+### Python Thread আর OS Thread — এরা কি আলাদা?
+
+এটা অনেকে গুলিয়ে ফেলে। সহজ করে বলি।
+
+**OS Thread** হলো operating system-এর তৈরি execution unit। OS নিজে schedule করে, নিজে switch করে।
+
+**Python Thread** হলো Python-এর `threading` module দিয়ে তৈরি thread। কিন্তু এরা আসলে OS thread-ই — Python শুধু একটা convenient wrapper দিয়েছে।
+
+```python
+import threading
+
+def worker():
+    print("আমি একটা thread")
+
+t = threading.Thread(target=worker)
+t.start()  # এটা আসলে OS-কে বলছে একটা নতুন OS thread তৈরি করতে
+```
+
+```
+Python Process
+┌────────────────────────────────────┐
+│                                    │
+│  threading.Thread(target=worker)   │
+│           ↓                        │
+│      OS Thread তৈরি হলো           │
+│      (OS-এর কাছে গেলো)            │
+│                                    │
+└────────────────────────────────────┘
+          ↓
+OS Kernel: "নতুন thread দাও"
+OS: [OS Thread তৈরি করলো, schedule করবে]
+```
+
+তাহলে Python Thread = OS Thread? হ্যাঁ, exactly। Python শুধু সেটাকে তৈরি করার আর manage করার একটা Python-friendly API দিয়েছে।
+
+---
+
+### GIL — Python Threading-এর বড় মাথাব্যথা
+
+Python-এ একটা বিশেষ জিনিস আছে: **GIL (Global Interpreter Lock)**।
+
+GIL মানে হলো — যেকোনো এক মুহূর্তে একটাই Python thread Python bytecode execute করতে পারবে। তুমি ১০টা thread তৈরি করলেও CPU-তে একসাথে একটাই চলবে।
+
+```
+Thread 1: [চলছে] → GIL ছাড়লো → অপেক্ষা
+Thread 2:            → GIL নিলো → [চলছে] → GIL ছাড়লো
+Thread 3:                           → GIL নিলো → [চলছে]
+...
+```
+
+**কেন GIL আছে?** Python-এর memory management (reference counting) thread-safe না। GIL দিয়ে race condition থেকে বাঁচানো হয়। এটা Python-এর একটা ঐতিহাসিক design decision।
+
+**মানে কী?** CPU-bound কাজে Python threading কোনো কাজে আসে না। ৪টা thread দিয়ে ৪x speed পাবে না — পাবে মোটামুটি 1x (কারণ একসাথে একটাই চলছে)।
+
+কিন্তু I/O-bound কাজে GIL release হয়। Thread যখন I/O-এর জন্য অপেক্ষা করছে (network, file), তখন সে GIL ছেড়ে দেয় এবং অন্য thread চলতে পারে।
+
+---
+
+### Thread Pool কী?
+
+Thread তৈরি করা expensive। প্রতিটা request-এ নতুন thread তৈরি করে শেষে delete করলে অনেক overhead।
+
+**Thread Pool** হলো আগে থেকে কিছু thread তৈরি করে রাখো, কাজ এলে সেগুলো দাও, কাজ শেষে ফেরত নাও — delete করো না।
+
+```
+Thread Pool (size=4):
+┌────────────────────────────────────────┐
+│  Thread 1: [idle]                      │
+│  Thread 2: [idle]                      │
+│  Thread 3: [idle]                      │
+│  Thread 4: [idle]                      │
+└────────────────────────────────────────┘
+
+কাজ এলো → Thread 1 নিলো → কাজ করলো → আবার idle
+আরেকটা কাজ এলো → Thread 2 নিলো → ...
+
+কোনো thread idle না থাকলে → কাজ queue-তে অপেক্ষা করে
+```
+
+Python-এ `ThreadPoolExecutor`:
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+with ThreadPoolExecutor(max_workers=4) as executor:
+    future1 = executor.submit(fetch_data, url1)  # Thread 1-এ দিলো
+    future2 = executor.submit(fetch_data, url2)  # Thread 2-এ দিলো
+    future3 = executor.submit(fetch_data, url3)  # Thread 3-এ দিলো
+
+    result1 = future1.result()  # অপেক্ষা করো
+    result2 = future2.result()
+    result3 = future3.result()
+```
+
+---
+
+### Threading vs Asyncio — কখন কোনটা?
+
+এটাই সবচেয়ে গুরুত্বপূর্ণ প্রশ্ন। চলো কয়েকটা situation দিয়ে দেখি।
+
+---
+
+#### Situation 1: পুরনো sync library (যেমন `requests`) দিয়ে অনেক API call
+
+`requests` library async না। এটা blocking। তুমি async করতে পারবে না।
+
+**Threading দিয়ে:**
+
+```python
+import threading
+import requests
+
+results = []
+lock = threading.Lock()
+
+def fetch(url):
+    data = requests.get(url).json()  # blocking, কিন্তু আলাদা thread-এ
+    with lock:
+        results.append(data)
+
+threads = [threading.Thread(target=fetch, args=(url,)) for url in urls]
+for t in threads: t.start()
+for t in threads: t.join()
+```
+
+```
+Thread 1: requests.get(url1) ─── waiting for network ───→ got data
+Thread 2: requests.get(url2) ─── waiting for network ───→ got data
+Thread 3: requests.get(url3) ─── waiting for network ───→ got data
+         [GIL release হয় I/O wait-এ, তাই সত্যিকারের concurrent]
+মোট: ~১ সেকেন্ড (সব একসাথে wait করছে)
+```
+
+**Asyncio দিয়ে (async library `httpx` ব্যবহার করে):**
+
+```python
+import asyncio
+import httpx
+
+async def fetch(client, url):
+    return await client.get(url)
+
+async def main():
+    async with httpx.AsyncClient() as client:
+        results = await asyncio.gather(*[fetch(client, url) for url in urls])
+```
+
+```
+Coroutine 1: await client.get(url1) → paused
+Coroutine 2: await client.get(url2) → paused
+Coroutine 3: await client.get(url3) → paused
+[সব একসাথে OS-এর epoll দিয়ে monitor হচ্ছে]
+মোট: ~১ সেকেন্ড
+```
+
+এই situation-এ দুটোই কাজ করে। কিন্তু:
+- Threading: memory বেশি খায়, race condition সম্ভব
+- Asyncio: memory কম, race condition নেই, কিন্তু async library লাগে
+
+**১০,০০০ request হলে?**
+
+```
+Threading:  ১০,০০০ thread = ~৮ GB RAM, OS overwhelmed ❌
+Asyncio:    ১০,০০০ coroutine = ~কয়েক MB RAM           ✅
+```
+
+---
+
+#### Situation 2: CPU-heavy কাজ — image resize
+
+```python
+from PIL import Image  # sync, CPU-heavy
+
+def resize_image(path):
+    img = Image.open(path)
+    img = img.resize((800, 600))
+    img.save(path + "_resized.jpg")
+```
+
+**Asyncio দিয়ে চেষ্টা করলে (ভুল!):**
+
+```python
+async def handle_images(paths):
+    for path in paths:
+        resize_image(path)  # ⚠️ CPU-heavy, কোনো await নেই
+```
+
+```
+Event Loop:
+  resize_image(path1) → CPU ব্যস্ত, ২ সেকেন্ড
+  [এই ২ সেকেন্ড event loop জমে আছে]
+  resize_image(path2) → আরো ২ সেকেন্ড
+  [মোট: sequential-এর মতোই]
+```
+
+Asyncio এখানে কোনো কাজে আসবে না — CPU-bound কাজে কোনো I/O wait নেই, তাই pause করার সুযোগ নেই।
+
+**Threading দিয়ে চেষ্টা করলে (আংশিক কাজ):**
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
+with ThreadPoolExecutor(max_workers=4) as ex:
+    futures = [ex.submit(resize_image, path) for path in paths]
+    for f in futures:
+        f.result()
+```
+
+```
+Thread 1: resize_image(path1) [CPU: 2s]
+Thread 2: resize_image(path2) [CPU: 2s]
+Thread 3: resize_image(path3) [CPU: 2s]
+Thread 4: resize_image(path4) [CPU: 2s]
+
+GIL কারণে: একটাই Python thread একসাথে চলছে
+[মোট: ~৮ সেকেন্ড, sequential-এর মতো!]  ❌
+```
+
+GIL-এর কারণে CPU-bound কাজে threading কাজ করে না।
+
+**সঠিক সমাধান — multiprocessing:**
+
+```python
+from concurrent.futures import ProcessPoolExecutor
+
+with ProcessPoolExecutor(max_workers=4) as ex:
+    futures = [ex.submit(resize_image, path) for path in paths]
+    for f in futures:
+        f.result()
+```
+
+```
+Process 1 (Core 1): resize_image(path1) [CPU: 2s]
+Process 2 (Core 2): resize_image(path2) [CPU: 2s]
+Process 3 (Core 3): resize_image(path3) [CPU: 2s]
+Process 4 (Core 4): resize_image(path4) [CPU: 2s]
+
+[আলাদা process = আলাদা GIL = সত্যিকারের parallel]
+মোট: ~২ সেকেন্ড ✅
+```
+
+---
+
+#### Situation 3: Async code-এ blocking legacy function
+
+তুমি FastAPI লিখছো (async), কিন্তু একটা পুরনো sync function ব্যবহার করতে হচ্ছে।
+
+```python
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from fastapi import FastAPI
+
+app = FastAPI()
+executor = ThreadPoolExecutor(max_workers=10)
+
+def old_sync_function(data):
+    # পুরনো blocking code, পরিবর্তন করা যাচ্ছে না
+    time.sleep(1)  # simulate DB call
+    return {"result": data}
+
+@app.get("/process")
+async def handler(data: str):
+    loop = asyncio.get_event_loop()
+    # blocking function-কে thread pool-এ পাঠাও
+    result = await loop.run_in_executor(executor, old_sync_function, data)
+    return result
+```
+
+```
+Event Loop (main thread):
+  request এলো
+  → run_in_executor → old_sync_function থ্রেডে পাঠালো
+  → await করলো (coroutine paused)
+  → অন্য requests handle করছে ✅
+
+Thread Pool:
+  Thread 1: old_sync_function(data) চলছে [blocking OK, আলাদা thread-এ]
+  → শেষ → event loop-কে notify
+  → coroutine resume → response পাঠালো
+```
+
+---
+
+#### সারাংশ: Threading vs Asyncio — কখন কোনটা
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    কোন situation?                               │
+└─────────────────────────────────────────────────────────────────┘
+          │
+          ├── CPU-heavy কাজ? (calculation, image, ML)
+          │         ↓
+          │    multiprocessing ব্যবহার করো
+          │    (আলাদা process = আলাদা CPU core = সত্যিকারের parallel)
+          │
+          ├── I/O-heavy কাজ, async library আছে? (httpx, asyncpg, aiofiles)
+          │         ↓
+          │    Asyncio ব্যবহার করো ✅
+          │    (হাজারো concurrent connection, কম memory)
+          │
+          ├── I/O-heavy কাজ, sync library ব্যবহার করতে হবে? (requests, psycopg2)
+          │         ↓
+          │    ThreadPoolExecutor ব্যবহার করো
+          │    (blocking call thread-এ পাঠাও)
+          │    অথবা async library-তে migrate করো
+          │
+          └── Async app-এ CPU-heavy কাজ মেশাতে হচ্ছে?
+                    ↓
+               run_in_executor(ProcessPoolExecutor) ব্যবহার করো
+```
+
+| Situation | সমাধান | কারণ |
+|---|---|---|
+| অনেক API call (async lib) | Asyncio + `gather` | কম memory, race condition নেই |
+| অনেক API call (sync lib) | ThreadPoolExecutor | I/O wait-এ GIL release হয় |
+| CPU-heavy (image/ML) | ProcessPoolExecutor | GIL bypass, সত্যিকারের parallel |
+| High-traffic web server | Asyncio (FastAPI/aiohttp) | হাজারো concurrent request |
+| পুরনো sync code, async app-এ | `run_in_executor` | event loop block হবে না |
+| সহজ script, ১-২টা কাজ | সাধারণ sync code | overhead বেশি, benefit নেই |
+
+---
+
+## 🌐 Part 6: Real-world — কোথায় asyncio লাগে, কোথায় না
 
 ### Use Case 1: একসাথে অনেক API Call
 
@@ -528,7 +1009,7 @@ Asyncio শুধু তখনই কাজে আসে যখন তুমি 
 
 ---
 
-## 🧠 Part 6: পুরো ছবিটা একসাথে
+## 🧠 Part 7: পুরো ছবিটা একসাথে
 
 ```
 Multitasking
@@ -536,12 +1017,17 @@ Multitasking
 ├── Parallelism (multiple worker, একই সময়ে সত্যিকারের parallel)
 │   └── Python: multiprocessing (আলাদা CPU core, GIL নেই)
 │
-└── Concurrency (single worker, smart scheduling)
+└── Concurrency (single/limited worker, smart scheduling)
     ├── Thread-based (OS manage করে, preemptive)
-    │   └── Python: threading (GIL আছে, I/O-bound-এ কিছুটা কাজের)
+    │   ├── Python: threading (OS thread wrapper)
+    │   ├── GIL আছে → CPU-bound-এ কাজ করে না
+    │   ├── I/O wait-এ GIL release → I/O-bound-এ কিছুটা কাজের
+    │   └── ThreadPoolExecutor দিয়ে pool manage করা ভালো
     │
     └── Coroutine-based (Python manage করে, cooperative)
-        └── Python: asyncio (event loop, I/O-bound-এর জন্য best)
+        ├── Python: asyncio (event loop, I/O-bound-এর জন্য best)
+        ├── epoll/kqueue দিয়ে OS-এর efficient notification
+        └── হাজারো concurrent connection, কম memory
 ```
 
 Asyncio-র চারটা মূল কাজ:
@@ -577,7 +1063,23 @@ Parallelism: multiple worker, literally একই সময়ে multiple ক�
 
 ### 5. CPU-heavy কাজ কি async দিয়ে fast হবে?
 
-না। Async শুধু I/O-bound কাজে কাজে আসে — যেখানে অপেক্ষা আছে। CPU-heavy কাজে multiprocessing দরকার।
+না। Async শুধু I/O-bound কাজে কাজে আসে — যেখানে অপেক্ষা আছে। CPU-heavy কাজে `ProcessPoolExecutor` দরকার।
+
+### 6. Coroutine-এর জীবনচক্র কী?
+
+`Created → Scheduled → Running → Paused → Running → Done`। একটা coroutine একাধিকবার Running ↔ Paused cycle করতে পারে। প্রতিটা `await`-এ Paused হয়, I/O শেষ হলে আবার Running।
+
+### 7. Python Thread আর OS Thread কি আলাদা?
+
+না। Python-এর `threading.Thread` আসলে OS thread-ই তৈরি করে — Python শুধু সেটার একটা convenient wrapper।
+
+### 8. Thread Pool কেন ব্যবহার করি?
+
+Thread তৈরি করা expensive। Pool মানে আগে থেকে thread রাখো, কাজে লাগাও, শেষে ফেরত নাও। নতুন thread তৈরির overhead বাঁচে।
+
+### 9. run_in_executor কখন লাগে?
+
+যখন async code-এর ভেতরে blocking/CPU-heavy কাজ করতে হয়। event loop block না করে কাজটা thread বা process pool-এ পাঠিয়ে দেওয়া যায়। I/O blocking → `ThreadPoolExecutor`, CPU-heavy → `ProcessPoolExecutor`।
 
 ---
 

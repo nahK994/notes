@@ -1,7 +1,7 @@
 # Table of contents
 
 * [Welcome](README.md)
-* [মাল্টিটাস্কিং](multitasking/multitasking.md)
+* [পাইথন concurrency](concurrency/python-concurrency.md)
 * [Server এর খুঁটিনাটি](server-internals/start.md)
     - [ground 0](server-internals/http-process-model-concurrency.md)
     - [WSGI](server-internals/wsgi.md)
