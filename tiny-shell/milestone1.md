@@ -28,22 +28,22 @@ Shell মূলত একটা **loop**:
 ┌─────────────────────────────────────────────┐
 │                SHELL LOOP                   │
 │                                             │
-│  1. Prompt দেখাও  ──►  "tiny-shell> "      │
+│  1. Prompt দেখাও  ──►  "tiny-shell> "        │
 │         │                                   │
 │         ▼                                   │
-│  2. Input পড়ো   ──►  "ls -la"             │
+│  2. Input পড়ো   ──►  "ls -la"               │
 │         │                                   │
 │         ▼                                   │
 │  3. Parse করো   ──►  cmd="ls", args=["-la"] │
 │         │                                   │
 │         ▼                                   │
-│  4. Execute করো ──►  নতুন process বানাও   │
+│  4. Execute করো ──►  নতুন process বানাও   	│
 │         │                                   │
 │         ▼                                   │
-│  5. Wait করো    ──►  process শেষ হওয়া পর্যন্ত│
+│  5. Wait করো    ──►  process শেষ হওয়া পর্যন্ত   │
 │         │                                   │
 │         └──────────────────────────────────►│
-│                  (আবার শুরু থেকে)           │
+│                  (আবার শুরু থেকে)            │
 └─────────────────────────────────────────────┘
 ```
 
@@ -60,13 +60,13 @@ Shell মূলত একটা **loop**:
 ```
 হোটেলের analogy:
 ┌──────────────────────────────────────────────────┐
-│  Guest (তুমি / তোমার program)                    │
-│  "আমাকে একটা room দাও, খাবার দাও"               │
+│  Guest (তুমি / তোমার program)                    	 │
+│  "আমাকে একটা room দাও, খাবার দাও"                 │
 ├──────────────────────────────────────────────────┤
 │  Reception / Manager (OS / Kernel)               │
-│  সব resource manage করে, fair share দেয়         │
+│  সব resource manage করে, fair share দেয়          │
 ├──────────────────────────────────────────────────┤
-│  হোটেলের Infrastructure (Hardware)              │
+│  হোটেলের Infrastructure (Hardware)                │
 │  Room (RAM), Kitchen (CPU), Storage (Disk)       │
 └──────────────────────────────────────────────────┘
 ```
@@ -80,21 +80,21 @@ OS ছাড়া প্রতিটা program-কে নিজেই RAM mana
 │              USER SPACE                     │
 │                                             │
 │   tiny-shell    ls    grep    firefox       │
-│   (তোমার program-রা এখানে চলে)             │
+│   (তোমার program-রা এখানে চলে)             	│
 │                                             │
 ├─────────────────────────────────────────────┤
 │         SYSTEM CALL INTERFACE               │
 │                                             │
-│   ← এটাই একমাত্র দরজা kernel-এ ঢোকার →    │
-│   User space থেকে kernel-এ যাওয়ার          │
-│   নিয়মকানুন এখানে                          │
+│   ← এটাই একমাত্র দরজা kernel-এ ঢোকার →    	│
+│   User space থেকে kernel-এ যাওয়ার          	│
+│   নিয়মকানুন এখানে                           	 │
 │                                             │
 ├─────────────────────────────────────────────┤
 │              KERNEL SPACE                   │
 │                                             │
 │  Process   File      Memory   Network       │
 │  Manager   System    Manager  Stack         │
-│  (কে চলবে) (disk     (RAM     (internet)   │
+│  (কে চলবে) (disk     (RAM     (internet)    │
 │            manage)   manage)               │
 │                                             │
 ├─────────────────────────────────────────────┤
