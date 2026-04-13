@@ -16,7 +16,6 @@
     - [Chapter 4: The Abstraction: The Process](os/chapter_4.md)
     - [Chapter 5: Process API](os/chapter_5.md) -->
  * [tiny-shell](tiny-shell/start.md)
-    - [milestone 1](tiny-shell/milestone1.md)
-    - [milestone 2](tiny-shell/milestone2.md)
-    - [milestone 3](tiny-shell/milestone3.md)
-    - [milestone 4](tiny-shell/milestone4.md)
+    - [concepts](tiny-shell/concepts/start.md)
+        - [shell](tiny-shell/concepts/01_shell.md)
+        - [os and kernel](tiny-shell/concepts/02_os_and_kernel.md)
