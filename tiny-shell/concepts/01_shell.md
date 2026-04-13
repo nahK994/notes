@@ -1,143 +1,172 @@
-## Shell কী? কেন লাগে?
+# Shell: অপারেটিং সিস্টেমের সাথে কথা বলার ভাষা
 
-তুমি Linux চালু করলে একটা কালো স্ক্রিন আসে। সেখানে টাইপ করো `ls`, Enter চাপো — file list দেখায়। এই কালো স্ক্রিনটাই **Shell**।
+কল্পনা করো তুমি একটা বিদেশী দেশে গেছো। ভাষা জানো না। তুমি যা চাও সেটা বলতে পারছো না, ওরা বুঝছে না। এখন যদি একজন দোভাষী থাকতো — তুমি বাংলায় বলো, সে অনুবাদ করে দেয় — কাজটা কত সহজ হয়ে যেতো।
 
-Shell হলো এমন একটা প্রোগ্রাম যা user আর operating system-এর kernel এর মধ্যে bridge হিসেবে কাজ করে।
+**Shell হলো সেই দোভাষী।**
 
-```
-তুমি                Shell              OS (Kernel)
-────                 ─────              ───────────
-"ls টাইপ করলাম" ──► বুঝলো, translate ──► "file list দাও"
-                     করলো              ──► দিলো
-                ◄─── দেখালো ◄───────────
-```
-
-Shell ছাড়া OS-এর সাথে কথা বলতে হলে machine code লিখতে হতো। Shell সেই কাজটা সহজ করে দেয়।
-
-**Shell কোনো magic না।** এটা নিজেও একটা সাধারণ program — ঠিক `ls` বা `grep`-এর মতোই। পার্থক্য একটাই: এটা **অন্য program চালানোর** কাজ করে।
-
-### Shell আসলে কী করে?
-
-Shell মূলত একটা **loop**:
+তুমি মানুষের ভাষায় বলো `ls`, shell সেটাকে OS-এর ভাষায় অনুবাদ করে পাঠায়, OS ফাইলের তালিকা দেয়, shell সেটা তোমার স্ক্রিনে দেখায়। Shell না থাকলে? Machine code লিখতে হতো।
 
 ```
-┌─────────────────────────────────────────────┐
-│                SHELL LOOP                   │
-│                                             │
-│  1. Prompt দেখাও  ──►  "tiny-shell> "        │
-│         │                                   │
-│         ▼                                   │
-│  2. Input পড়ো   ──►  "ls -la"               │
-│         │                                   │
-│         ▼                                   │
-│  3. Parse করো   ──►  cmd="ls", args=["-la"] │
-│         │                                   │
-│         ▼                                   │
-│  4. Execute করো ──►  নতুন process বানাও     │
-│         │                                   │
-│         ▼                                   │
-│  5. Wait করো    ──►  process শেষ হওয়া পর্যন্ত │
-│         │                                   │
-│         └──────────────────────────────────►│
-│                  (আবার শুরু থেকে)            │
-└─────────────────────────────────────────────┘
+তুমি → "ls টাইপ করলাম"
+  ↓
+Shell → বুঝলো, অনুবাদ করলো
+  ↓
+OS (Kernel) → "file list দাও" → দিলো
+  ↓
+Shell → তোমার স্ক্রিনে দেখালো
 ```
 
-এটাকে বলে **REPL** — Read, Eval, Print, Loop।
-
-Shell-এর কাজ মূলত চারটা ধাপের একটা চক্র:
-
-```
-┌──────────────────────────────────────────────────┐
-│                  SHELL LOOP                      │
-│                                                  │
-│  ┌─────────┐                                     │
-│  │  READ   │ ← prompt দেখাও, input পড়ো           │
-│  └────┬────┘   "tiny-shell> ls -la | grep .go"   │
-│       │                                          │
-│       ▼                                          │
-│  ┌─────────┐                                     │
-│  │  PARSE  │ ← input-কে ভাঙো, মানে বোঝো           │
-│  └────┬────┘   cmd="ls", args=["-la"]            │
-│       │        pipe আছে, grep আছে               │
-│       │                                          │
-│       ▼                                          │
-│  ┌─────────┐                                     │
-│  │ EXECUTE │ ← process তৈরি করো, চালাও            │
-│  └────┬────┘   fork → exec → wait                │
-│       │                                          │
-│       ▼                                          │
-│  ┌─────────┐                                     │
-│  │  LOOP   │ ← শেষ হলে আবার শুরু থেকে              │
-│  └────┬────┘                                     │
-│       │                                          │
-│       └─────────────────────────────────────────►│
-└──────────────────────────────────────────────────┘
-```
-
-Shell আসলে অনেক কিছু করে:
-
-```
-Shell-এর দায়িত্ব:
-┌────────────────────────────────────────────────────┐
-│                                                    │
-│  Input পড়া      → keyboard থেকে line নেওয়া          │
-│                                                    │
-│  Parse করা      → "ls -la | grep .go" বুঝে           │
-│                   দুটো command চেনা, pipe চেনা        │
-│                                                    │
-│  Built-in চেক   → cd, exit নিজে handle করা          │
-│                   (এগুলো child process-এ হয় না)    │
-│                                                    │
-│  Process চালানো → fork + exec + wait                │
-│                                                    │
-│  Pipe লাগানো    → দুই process-এর মাঝে data path       │
-│                                                    │
-│  Signal handle  → Ctrl+C, Ctrl+Z ধরা                │
-│                                                    │
-│  Job track করা  → background process মনে রাখা        │
-│                                                    │
-└────────────────────────────────────────────────────┘
-```
+একটা গুরুত্বপূর্ণ কথা — **Shell কোনো magic না।** এটা নিজেও একটা সাধারণ প্রোগ্রাম, ঠিক `ls` বা `grep`-এর মতোই। পার্থক্য একটাই: এটা **অন্য প্রোগ্রাম চালানোর** কাজ করে।
 
 ---
 
-## ২. Shell কত প্রকার?
+## Shell আসলে ভেতরে কী করে?
 
-Shell মূলত দুই ভাগে ভাগ করা যায়।
+Shell-এর কাজ বুঝতে হলে একটা ধারণা মাথায় রাখো — Shell একটা **অবিরাম চলতে থাকা loop।**
 
-### Command-line Shell (CLI Shell)
+তুমি command দাও, সে চালায়, আবার তোমার দিকে তাকিয়ে থাকে। এই চক্রের একটা নাম আছে: **REPL — Read, Eval, Print, Loop।**
 
-Text-based। তুমি যা টাইপ করো সেটা command হিসেবে নেয়। আমরা যে tiny-shell বানাচ্ছি সেটা এই ধরনের।
+```
+┌─────────────────────────────────────────────────────┐
+│                    SHELL LOOP                       │
+│                                                     │
+│  ┌─────────┐                                        │
+│  │  READ   │  ← prompt দেখাও, input পড়ো             │
+│  └────┬────┘    "$ ls -la | grep .go"               │
+│       │                                             │
+│       ▼                                             │
+│  ┌─────────┐                                        │
+│  │  PARSE  │  ← input ভাঙো, মানে বোঝো               │
+│  └────┬────┘    cmd="ls", args=["-la"]              │
+│       │         pipe আছে, grep আছে                 │
+│       ▼                                             │
+│  ┌─────────┐                                        │
+│  │ EXECUTE │  ← process তৈরি করো, চালাও             │
+│  └────┬────┘    fork → exec → wait                  │
+│       │                                             │
+│       ▼                                             │
+│  ┌─────────┐                                        │
+│  │  LOOP   │  ← শেষ হলে আবার শুরু থেকে               │
+│  └────┬────┘                                        │
+│       └────────────────────────────────────────────►│
+└─────────────────────────────────────────────────────┘
+```
 
-| Shell       | OS                     | বৈশিষ্ট্য                                  |
-|-------------|------------------------|---------------------------------------------|
-| `bash`      | Linux, macOS (পুরনো)   | সবচেয়ে common, scripting-এ শক্তিশালী        |
-| `zsh`       | Linux, macOS (নতুন)    | plugin system, autocomplete, থিম            |
-| `fish`      | Linux, macOS           | syntax highlight, সহজ scripting             |
-| `sh`        | Unix, Linux            | POSIX standard, সবচেয়ে portable            |
-| `PowerShell`| Windows, Linux, macOS  | object-based pipeline, .NET integration     |
-| `cmd.exe`   | Windows                | পুরনো, সীমিত, batch scripting               |
+প্রতিটা ধাপে Shell বেশ কিছু কাজ করে:
 
-### Graphical Shell (GUI Shell)
+```
+Shell-এর দায়িত্ব:
+┌──────────────────────────────────────────────────────┐
+│                                                      │
+│  Input পড়া       → keyboard থেকে line নেওয়া          │
+│                                                      │
+│  Parse করা       → "ls -la | grep .go" বুঝে           │
+│                    দুটো command চেনা, pipe চেনা       │
+│                                                      │
+│  Built-in চেক    → cd, exit নিজে handle করা          │
+│                    (এগুলো child process-এ হয় না)     │
+│                                                      │
+│  Process চালানো  → fork + exec + wait                │
+│                                                      │
+│  Pipe লাগানো     → দুই process-এর মাঝে data path      │
+│                                                      │
+│  Signal handle   → Ctrl+C, Ctrl+Z ধরা                │
+│                                                      │
+│  Job track করা   → background process মনে রাখা       │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+```
 
-Desktop environment হিসেবে কাজ করে — window, icon, mouse সব এর অংশ।
+একটু থামো। **Built-in command** মানে কী?
 
-| Shell          | OS      |
-|----------------|---------|
+`cd` বা `exit` — এগুলো আলাদা কোনো প্রোগ্রাম না। এগুলো Shell-এর নিজের ভেতরে গেঁথে রাখা command। কারণটা সহজ: `cd` যদি child process-এ চলতো, সে নিজের directory বদলাতো, তারপর মরে যেতো — তোমার shell-এর directory একই থাকতো। তাই এই বিশেষ command গুলো Shell নিজেই সরাসরি চালায়।
+
+---
+
+## fork → exec → wait: Shell-এর তিনটা জাদুর ধাপ
+
+যখন তুমি `ls` লেখো, Shell আসলে তিনটা OS system call করে:
+
+**`fork()`** — Shell নিজের একটা হুবহু copy তৈরি করে। এই copy-টাকে বলে child process।
+
+**`exec()`** — child process নিজেকে মুছে ফেলে `ls` প্রোগ্রাম দিয়ে replace করে।
+
+**`wait()`** — parent shell অপেক্ষা করে, `ls` শেষ না হওয়া পর্যন্ত নতুন prompt দেয় না।
+
+```
+Shell (parent)
+    │
+    ├── fork() ──► Shell-এর copy (child)
+    │                    │
+    │              exec("ls") ──► ls চলে, output দেয়
+    │                    │
+    └── wait() ◄── child মরে যায়
+    │
+    ▼
+আবার prompt দেখায়
+```
+
+এই তিনটা ধাপ না বুঝলে Shell-এর কিছুই বোঝা যায় না। পরে যখন নিজে Shell বানাবে, এই তিনটা function-ই হবে তোমার মূল হাতিয়ার।
+
+---
+
+## Shell কত প্রকার?
+
+Shell মূলত দুই ভাগ।
+
+### Command-line Shell (CLI)
+
+Text-based। তুমি টাইপ করো, সে চালায়।
+
+| Shell        | OS                     | বৈশিষ্ট্য                               |
+|--------------|------------------------|------------------------------------------|
+| `bash`       | Linux, macOS (পুরনো)   | সবচেয়ে common, scripting-এ শক্তিশালী   |
+| `zsh`        | macOS (Catalina+)      | plugin system, autocomplete, থিম         |
+| `fish`       | Linux, macOS           | syntax highlight, সহজ scripting          |
+| `sh`         | Unix, Linux            | POSIX standard, সবচেয়ে portable         |
+| `PowerShell` | Windows, Linux, macOS  | object-based pipeline, .NET integration  |
+| `cmd.exe`    | Windows                | পুরনো, সীমিত, batch scripting            |
+
+### Graphical Shell (GUI)
+
+Desktop environment — window, icon, mouse সব এর অংশ।
+
+| Shell            | OS      |
+|------------------|---------|
 | Windows Explorer | Windows |
-| GNOME Shell    | Linux   |
-| KDE Plasma     | Linux   |
-| Aqua           | macOS   |
+| GNOME Shell      | Linux   |
+| KDE Plasma       | Linux   |
+| Aqua             | macOS   |
+
+> তুমি এতদিন যে Desktop ব্যবহার করেছো সেটাও একটা Shell — শুধু graphical।
 
 ### কোন OS-এ কোন Shell?
 
-| Operating System   | Default Shell                                        |
-|--------------------|------------------------------------------------------|
-| Ubuntu / Debian    | `bash`                                               |
-| macOS (Catalina+)  | `zsh` — Apple ২০১৯ সালে `bash` থেকে switch করেছে   |
-| macOS (পুরনো)      | `bash`                                               |
-| Windows 10/11      | `PowerShell` (নতুন), `cmd.exe` (পুরনো), WSL-এ `bash`|
-| Android            | `sh` (mksh variant)                                  |
-| Embedded Linux     | `sh` বা busybox sh — হালকা, কম resource লাগে        |
-| FreeBSD            | `sh`                                                 |
+| Operating System | Default Shell                                       |
+|------------------|-----------------------------------------------------|
+| Ubuntu / Debian  | `bash`                                              |
+| macOS (Catalina+)| `zsh` — Apple ২০১৯ সালে `bash` থেকে switch করেছে  |
+| macOS (পুরনো)    | `bash`                                              |
+| Windows 10/11    | `PowerShell`, `cmd.exe`, WSL-এ `bash`               |
+| Android          | `sh` (mksh variant)                                 |
+| Embedded Linux   | `sh` বা busybox sh — হালকা, কম resource             |
+| FreeBSD          | `sh`                                                |
+
+---
+
+## Shell কেন নিজে বানাবো?
+
+Shell ব্যবহার করা আর Shell বোঝা — এই দুটো সম্পূর্ণ আলাদা জিনিস।
+
+যখন তুমি নিজে একটা Shell বানাবে, তুমি আসলে শিখবে:
+
+- OS কীভাবে process তৈরি করে
+- Program-রা একে অপরের সাথে কীভাবে কথা বলে (pipe)
+- Keyboard-এর Ctrl+C কীভাবে একটা চলতে থাকা program থামায় (signal)
+- Terminal আসলে কীভাবে কাজ করে
+
+Shell বানানো মানে শুধু একটা tool বানানো না — এটা OS-এর ভেতরের দুনিয়াটা নিজের হাতে ছুঁয়ে দেখা।
+
+চলো শুরু করি।
+
+---
